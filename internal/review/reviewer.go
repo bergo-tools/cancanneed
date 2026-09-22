@@ -261,13 +261,12 @@ func buildPrompt(request Request, submitPath string) string {
 
 执行规则：
 1. 不要编辑仓库文件、创建提交、切换分支或推送任何内容。
-2. 自行使用 git fetch 拉取并检查变更，以 FETCH_HEAD 作为本次审查的最新终点。按需阅读相关上下文代码，并在可行时运行只读检查或测试。
+2. 自行使用 git fetch 拉取并检查变更，以 FETCH_HEAD 作为本次审查的最新终点。按需阅读相关上下文代码，不要运行测试，也不要写入，只进行review。
 3. 每发现一个符合上述上报标准的问题，调用一次下面的工具；多个问题可以并发提交：
    %s finding --author "<git show -s --format=%%an 得到的提交作者名称>" --commit "<完整提交 SHA>" --file "<仓库相对文件路径>" --line <新文件中的行号> --severity "<critical|high|medium|low|info>" --title "<问题标题>" --detail "<问题原因和修复建议>"
-4. 准备退出前，再次 fetch 同一个远端分支。如果 FETCH_HEAD 发生变化，继续审查新增变更；只有确认当前 FETCH_HEAD 的全部目标改动已经审查完，才能结束审查。
-5. 等待所有 finding 命令执行完成后直接正常退出。没有 finding 时也直接正常退出。
+4. 等待所有 finding 命令执行完成后直接正常退出。没有 finding 时也直接正常退出。
 
-提交工具会创建并安全更新结构化 JSON 结果。不要自行创建或编辑 review.json。agent 进程以退出码 0 正常退出即表示本次审查完成；非零退出表示失败并触发重试。
+提交工具会创建并安全更新结构化 JSON 结果。不要自行创建或编辑 review.json
 `, introduction, coverage, shellCommand(submitPath), shellCommand(submitPath))
 }
 
