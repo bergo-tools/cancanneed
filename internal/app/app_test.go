@@ -97,7 +97,7 @@ func TestRunOnceReviewsLatestCommitWithoutBaseline(t *testing.T) {
 	retries := 0
 	cfg := config.Config{
 		PollInterval: config.Duration(time.Minute),
-		StateFile:    filepath.Join(dir, "state.json"),
+		StateDir:     filepath.Join(dir, "state"),
 		RunsDir:      filepath.Join(dir, "runs"),
 		Concurrency:  1,
 		Repositories: []config.Repository{{
@@ -115,7 +115,7 @@ func TestRunOnceReviewsLatestCommitWithoutBaseline(t *testing.T) {
 			},
 		}},
 	}
-	store, err := state.Open(cfg.StateFile)
+	store, err := state.Open(cfg.StateDir, "demo")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -335,7 +335,7 @@ func (*failOnceNotifier) NotifyReviewFailure(context.Context, model.ReviewFailur
 }
 
 func TestDeliverPendingResumesFromFirstUnsentCard(t *testing.T) {
-	store, err := state.Open(filepath.Join(t.TempDir(), "state.json"))
+	store, err := state.Open(filepath.Join(t.TempDir(), "state"), "api")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -405,7 +405,7 @@ func (*failSecondCardOnceNotifier) NotifyReviewFailure(context.Context, model.Re
 }
 
 func TestReviewFailuresNotifyFirstAndEveryThirtyForSameHead(t *testing.T) {
-	store, err := state.Open(filepath.Join(t.TempDir(), "state.json"))
+	store, err := state.Open(filepath.Join(t.TempDir(), "state"), "api")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -466,7 +466,7 @@ func TestReviewRetryDelayOnlyAppliesToTheSameHead(t *testing.T) {
 }
 
 func TestFailedReviewNotificationSurvivesARecoveredReview(t *testing.T) {
-	store, err := state.Open(filepath.Join(t.TempDir(), "state.json"))
+	store, err := state.Open(filepath.Join(t.TempDir(), "state"), "api")
 	if err != nil {
 		t.Fatal(err)
 	}

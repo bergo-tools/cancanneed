@@ -35,6 +35,9 @@ repositories:
 	if cfg.Repositories[0].Path != filepath.Join(dir, "repo") {
 		t.Fatalf("path = %q", cfg.Repositories[0].Path)
 	}
+	if cfg.StateDir != filepath.Join(dir, ".cancanneed", "state") {
+		t.Fatalf("state dir = %q", cfg.StateDir)
+	}
 	if cfg.Repositories[0].Agent.Command != "omp" {
 		t.Fatalf("command = %q", cfg.Repositories[0].Agent.Command)
 	}

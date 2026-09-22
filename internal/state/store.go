@@ -1,11 +1,14 @@
 package state
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strings"
 	"sync"
 	"time"
 
@@ -29,74 +32,76 @@ type ReviewFailureState struct {
 	LastFailedAt time.Time `json:"last_failed_at"`
 }
 
-type diskState struct {
-	Version      int                        `json:"version"`
-	Repositories map[string]RepositoryState `json:"repositories"`
+type diskRepositoryState struct {
+	Version    int             `json:"version"`
+	Repository string          `json:"repository"`
+	State      RepositoryState `json:"state"`
 }
 
-// Store serializes every update so concurrent repository workers cannot lose state.
-type Store struct {
-	mu       sync.Mutex
+type repositoryFile struct {
+	name     string
 	path     string
-	data     diskState
+	state    RepositoryState
+	exists   bool
 	fileLock *fileLock
-	closed   bool
 }
 
-func Open(path string) (*Store, error) {
-	lock, err := acquireFileLock(path + ".lock")
-	if err != nil {
-		return nil, fmt.Errorf("lock state: %w", err)
-	}
-	keepLock := false
-	defer func() {
-		if !keepLock {
-			_ = lock.close()
-		}
-	}()
+// Store keeps one independently locked JSON file per configured repository.
+type Store struct {
+	mu           sync.Mutex
+	directory    string
+	repositories map[string]*repositoryFile
+	paths        map[string]string
+	closed       bool
+}
 
+func Open(directory string, repositoryNames ...string) (*Store, error) {
+	if err := os.MkdirAll(directory, 0o755); err != nil {
+		return nil, fmt.Errorf("create state directory: %w", err)
+	}
 	s := &Store{
-		path:     path,
-		data:     diskState{Version: 1, Repositories: make(map[string]RepositoryState)},
-		fileLock: lock,
+		directory:    directory,
+		repositories: make(map[string]*repositoryFile, len(repositoryNames)),
+		paths:        make(map[string]string, len(repositoryNames)),
 	}
-	b, err := os.ReadFile(path)
-	if errors.Is(err, os.ErrNotExist) {
-		keepLock = true
-		return s, nil
+	for _, name := range repositoryNames {
+		if _, err := s.openLocked(name); err != nil {
+			_ = s.closeLocked()
+			return nil, err
+		}
 	}
-	if err != nil {
-		return nil, fmt.Errorf("read state: %w", err)
-	}
-	if err := json.Unmarshal(b, &s.data); err != nil {
-		return nil, fmt.Errorf("decode state: %w", err)
-	}
-	if s.data.Version != 1 {
-		return nil, fmt.Errorf("unsupported state version %d", s.data.Version)
-	}
-	if s.data.Repositories == nil {
-		s.data.Repositories = make(map[string]RepositoryState)
-	}
-	keepLock = true
 	return s, nil
 }
 
-// Close releases the process-wide ownership of the state file.
+// Close releases every repository state lock held by this process.
 func (s *Store) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.closeLocked()
+}
+
+func (s *Store) closeLocked() error {
 	if s.closed {
 		return nil
 	}
 	s.closed = true
-	return s.fileLock.close()
+	var closeErrors []error
+	for _, repository := range s.repositories {
+		if err := repository.fileLock.close(); err != nil {
+			closeErrors = append(closeErrors, fmt.Errorf("close state for %s: %w", repository.name, err))
+		}
+	}
+	return errors.Join(closeErrors...)
 }
 
 func (s *Store) Get(name string) (RepositoryState, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	value, ok := s.data.Repositories[name]
-	return cloneRepositoryState(value), ok
+	repository, ok := s.repositories[name]
+	if !ok || !repository.exists {
+		return RepositoryState{}, false
+	}
+	return cloneRepositoryState(repository.state), true
 }
 
 func (s *Store) Put(name string, value RepositoryState) error {
@@ -105,17 +110,87 @@ func (s *Store) Put(name string, value RepositoryState) error {
 	if s.closed {
 		return errors.New("state store is closed")
 	}
-	previous, existed := s.data.Repositories[name]
-	s.data.Repositories[name] = cloneRepositoryState(value)
-	if err := s.saveLocked(); err != nil {
-		if existed {
-			s.data.Repositories[name] = previous
-		} else {
-			delete(s.data.Repositories, name)
-		}
+	repository, err := s.openLocked(name)
+	if err != nil {
 		return err
 	}
+	value = cloneRepositoryState(value)
+	if err := saveRepository(repository.path, name, value); err != nil {
+		return err
+	}
+	repository.state = value
+	repository.exists = true
 	return nil
+}
+
+func (s *Store) openLocked(name string) (*repositoryFile, error) {
+	if s.closed {
+		return nil, errors.New("state store is closed")
+	}
+	if strings.TrimSpace(name) == "" {
+		return nil, errors.New("repository name is required for state")
+	}
+	if repository, exists := s.repositories[name]; exists {
+		return repository, nil
+	}
+	path := filepath.Join(s.directory, RepositoryFileName(name))
+	if owner, exists := s.paths[path]; exists && owner != name {
+		return nil, fmt.Errorf("repository names %q and %q resolve to the same state file", owner, name)
+	}
+	lock, err := acquireFileLock(path + ".lock")
+	if err != nil {
+		return nil, fmt.Errorf("lock state for repository %q: %w", name, err)
+	}
+	repository := &repositoryFile{name: name, path: path, fileLock: lock}
+	b, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		s.repositories[name] = repository
+		s.paths[path] = name
+		return repository, nil
+	}
+	if err != nil {
+		_ = lock.close()
+		return nil, fmt.Errorf("read state for repository %q: %w", name, err)
+	}
+	var disk diskRepositoryState
+	if err := json.Unmarshal(b, &disk); err != nil {
+		_ = lock.close()
+		return nil, fmt.Errorf("decode state for repository %q: %w", name, err)
+	}
+	if disk.Version != 1 {
+		_ = lock.close()
+		return nil, fmt.Errorf("unsupported state version %d for repository %q", disk.Version, name)
+	}
+	if disk.Repository != name {
+		_ = lock.close()
+		return nil, fmt.Errorf("state file %s belongs to repository %q, not %q", path, disk.Repository, name)
+	}
+	repository.state = cloneRepositoryState(disk.State)
+	repository.exists = true
+	s.repositories[name] = repository
+	s.paths[path] = name
+	return repository, nil
+}
+
+var unsafeFileName = regexp.MustCompile(`[^A-Za-z0-9._-]+`)
+
+// RepositoryFileName returns the stable JSON filename used for a repository.
+func RepositoryFileName(name string) string {
+	base := strings.Trim(unsafeFileName.ReplaceAllString(name, "-"), "-.")
+	changed := base != name
+	if base == "" {
+		base = "repository"
+		changed = true
+	}
+	if len(base) > 80 {
+		base = strings.TrimRight(base[:80], "-.")
+		changed = true
+	}
+	if changed {
+		hash := sha256.Sum256([]byte(name))
+		base += fmt.Sprintf("-%x", hash[:8])
+	}
+	return base + ".json"
 }
 
 func cloneRepositoryState(value RepositoryState) RepositoryState {
@@ -138,12 +213,13 @@ func clonePendingNotification(value model.PendingNotification) model.PendingNoti
 	return value
 }
 
-func (s *Store) saveLocked() error {
-	dir := filepath.Dir(s.path)
+func saveRepository(path, name string, state RepositoryState) error {
+	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("create state directory: %w", err)
 	}
-	b, err := json.MarshalIndent(s.data, "", "  ")
+	disk := diskRepositoryState{Version: 1, Repository: name, State: state}
+	b, err := json.MarshalIndent(disk, "", "  ")
 	if err != nil {
 		return fmt.Errorf("encode state: %w", err)
 	}
@@ -174,7 +250,7 @@ func (s *Store) saveLocked() error {
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("close state: %w", err)
 	}
-	if err := os.Rename(tmpName, s.path); err != nil {
+	if err := os.Rename(tmpName, path); err != nil {
 		return fmt.Errorf("replace state: %w", err)
 	}
 	removeTemp = false

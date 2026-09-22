@@ -58,7 +58,11 @@ func run(arguments []string) error {
 	if err != nil {
 		return err
 	}
-	store, err := state.Open(cfg.StateFile)
+	repositoryNames := make([]string, len(cfg.Repositories))
+	for i, repository := range cfg.Repositories {
+		repositoryNames[i] = repository.Name
+	}
+	store, err := state.Open(cfg.StateDir, repositoryNames...)
 	if err != nil {
 		return err
 	}

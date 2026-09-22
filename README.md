@@ -43,7 +43,16 @@ go build -o cancanneed ./cmd/cancanneed
 
 `once` 模式会按 `concurrency` 限制并行仓库数；常驻 `run` 模式固定为每个仓库一个 goroutine。
 
-同一份 `state_file` 同时只允许一个 cancanneed 进程持有。第二个 `run` 或 `once` 实例会在启动时直接报错，避免不同进程互相覆盖 HEAD、失败计数和通知队列。
+`state_dir` 默认为配置文件目录下的 `.cancanneed/state`。每个仓库独立保存状态，例如：
+
+```text
+.cancanneed/state/backend.json
+.cancanneed/state/frontend.json
+```
+
+每个文件只包含对应仓库的 HEAD、失败计数和通知队列。停止 cancanneed 后，可以单独删除某个 JSON，让该仓库下次按“无历史 HEAD”处理，而不影响其他仓库。普通字母、数字、点、下划线和连字符组成的仓库名会直接作为文件名；其他名称会转换成安全名称并附加稳定哈希，避免冲突。
+
+每个仓库状态有独立进程锁。同一个仓库不能被两个 `run`/`once` 实例同时监控，但只要仓库集合不重叠，多个实例可以共用同一 `state_dir`。
 
 配置使用严格 YAML，未知字段会被拒绝。相对路径以配置文件所在目录为基准，字符串中的 `${ENV_NAME}` 会从 cancanneed 进程的环境变量展开。完整配置见 [config.example.yaml](config.example.yaml)，其中只保留一个示例仓库并为每个配置项提供了注释。
 

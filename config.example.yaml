@@ -1,8 +1,8 @@
 # 全局轮询间隔；启动后立即检查，整轮 review 失败后也按此间隔重试。
 poll_interval: 2m
 
-# 状态文件路径；相对路径以本配置文件所在目录为基准，同一时间只允许一个进程持有。
-state_file: .cancanneed/state.json
+# 仓库状态目录；每个仓库使用独立 JSON 文件，相对路径以本配置文件所在目录为基准。
+state_dir: .cancanneed/state
 
 # 每次 review 的日志、请求元数据和提交工具所在目录。
 runs_dir: .cancanneed/runs

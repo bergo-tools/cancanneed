@@ -40,7 +40,7 @@ func (d Duration) Value() time.Duration { return time.Duration(d) }
 
 type Config struct {
 	PollInterval   Duration                       `yaml:"poll_interval"`
-	StateFile      string                         `yaml:"state_file"`
+	StateDir       string                         `yaml:"state_dir"`
 	RunsDir        string                         `yaml:"runs_dir"`
 	AuthorsFile    string                         `yaml:"authors_file,omitempty"`
 	AuthorMentions map[string]model.AuthorMention `yaml:"-"`
@@ -127,13 +127,13 @@ func (c *Config) applyDefaults(baseDir string) {
 	if c.PollInterval == 0 {
 		c.PollInterval = Duration(defaultPollInterval)
 	}
-	if c.StateFile == "" {
-		c.StateFile = ".cancanneed/state.json"
+	if c.StateDir == "" {
+		c.StateDir = ".cancanneed/state"
 	}
 	if c.RunsDir == "" {
 		c.RunsDir = ".cancanneed/runs"
 	}
-	c.StateFile = expandedPath(baseDir, c.StateFile)
+	c.StateDir = expandedPath(baseDir, c.StateDir)
 	c.RunsDir = expandedPath(baseDir, c.RunsDir)
 	if c.AuthorsFile != "" {
 		c.AuthorsFile = expandedPath(baseDir, c.AuthorsFile)
@@ -326,8 +326,8 @@ func (c Config) validate() error {
 	if c.Concurrency < 1 {
 		problems = append(problems, errors.New("concurrency must be at least 1"))
 	}
-	if c.StateFile == "" {
-		problems = append(problems, errors.New("state_file cannot expand to an empty path"))
+	if c.StateDir == "" {
+		problems = append(problems, errors.New("state_dir cannot expand to an empty path"))
 	}
 	if c.RunsDir == "" {
 		problems = append(problems, errors.New("runs_dir cannot expand to an empty path"))
