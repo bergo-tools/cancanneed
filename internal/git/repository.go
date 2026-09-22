@@ -7,6 +7,9 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+	"time"
+
+	"cancanneed/internal/model"
 )
 
 type Repository struct {
@@ -77,6 +80,32 @@ func (r Repository) ReviewHead(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("unexpected reviewed FETCH_HEAD: %q", head)
 	}
 	return head, nil
+}
+
+// CommitInfo reads display metadata for one commit from the local object store.
+func (r Repository) CommitInfo(ctx context.Context, commit string) (model.CommitInfo, error) {
+	if !validObjectID(commit) {
+		return model.CommitInfo{}, fmt.Errorf("invalid commit object ID %q", commit)
+	}
+	out, err := r.run(ctx, "show", "-s", "--format=%H%x00%an%x00%ae%x00%cI%x00%s", commit, "--")
+	if err != nil {
+		return model.CommitInfo{}, fmt.Errorf("read commit info for %s: %w", commit, err)
+	}
+	fields := strings.SplitN(out, "\x00", 5)
+	if len(fields) != 5 || !strings.EqualFold(fields[0], commit) {
+		return model.CommitInfo{}, fmt.Errorf("unexpected commit info for %s", commit)
+	}
+	committedAt, err := time.Parse(time.RFC3339, fields[3])
+	if err != nil {
+		return model.CommitInfo{}, fmt.Errorf("parse commit time for %s: %w", commit, err)
+	}
+	return model.CommitInfo{
+		Commit:      strings.ToLower(fields[0]),
+		Author:      fields[1],
+		AuthorEmail: fields[2],
+		CommittedAt: committedAt,
+		Subject:     fields[4],
+	}, nil
 }
 
 // PinRemoteHead fetches the initial baseline without touching the index or work tree.

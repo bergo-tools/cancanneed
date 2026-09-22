@@ -210,6 +210,7 @@ func cloneRepositoryState(value RepositoryState) RepositoryState {
 
 func clonePendingNotification(value model.PendingNotification) model.PendingNotification {
 	value.Report.Findings = append([]model.Finding(nil), value.Report.Findings...)
+	value.Report.Commits = append([]model.CommitInfo(nil), value.Report.Commits...)
 	return value
 }
 

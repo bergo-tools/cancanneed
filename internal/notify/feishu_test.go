@@ -57,7 +57,14 @@ func TestFeishuRejectsApplicationError(t *testing.T) {
 }
 
 func TestFeishuGroupsCardsByAuthorAndCommitAndSplitsLargeGroups(t *testing.T) {
-	report := model.Report{Repository: "api", Branch: "main", Verdict: "request_changes"}
+	report := model.Report{
+		Repository: "api", Branch: "main", Verdict: "request_changes",
+		Commits: []model.CommitInfo{
+			{Commit: "aaaaaaaaaaaaaaaa", Author: "Alice", AuthorEmail: "alice@example.com", Subject: "fix transaction rollback", CommittedAt: time.Date(2026, 9, 22, 10, 30, 0, 0, time.FixedZone("CST", 8*60*60))},
+			{Commit: "bbbbbbbbbbbbbbbb", Author: "Alice", AuthorEmail: "alice@example.com", Subject: "guard concurrent writes", CommittedAt: time.Date(2026, 9, 22, 11, 0, 0, 0, time.FixedZone("CST", 8*60*60))},
+			{Commit: "cccccccccccccccc", Author: "Bob", AuthorEmail: "bob@example.com", Subject: "handle request errors", CommittedAt: time.Date(2026, 9, 22, 12, 0, 0, 0, time.FixedZone("CST", 8*60*60))},
+		},
+	}
 	for i := 0; i < maxFindingsPerCard+1; i++ {
 		commit := "aaaaaaaaaaaaaaaa"
 		if i >= 4 {
@@ -78,10 +85,15 @@ func TestFeishuGroupsCardsByAuthorAndCommitAndSplitsLargeGroups(t *testing.T) {
 	first := cardText(t, cards[0])
 	second := cardText(t, cards[1])
 	third := cardText(t, cards[2])
-	if !strings.Contains(first, "Alice") || !strings.Contains(first, "aaaaaaaaaaaa") || !strings.Contains(first, "bbbbbbbbbbbb") || strings.Contains(first, "Bob") {
-		t.Fatalf("first Alice card is not grouped by author and commit: %s", first)
+	if !strings.Contains(first, "Alice") || !strings.Contains(first, "aaaaaaaaaaaa") || strings.Contains(first, "bbbbbbbbbbbb") || strings.Contains(first, "Bob") {
+		t.Fatalf("first Alice card split a commit group incorrectly: %s", first)
 	}
-	if !strings.Contains(second, "Alice") || !strings.Contains(second, "分片") || !strings.Contains(second, "2/2") || strings.Contains(second, "Bob") {
+	for _, want := range []string{"fix transaction rollback", "alice@example.com", "2026-09-22 10:30:00 +08:00", "alice-0", "alice-3"} {
+		if !strings.Contains(first, want) {
+			t.Fatalf("first commit card does not contain %q: %s", want, first)
+		}
+	}
+	if !strings.Contains(second, "Alice") || !strings.Contains(second, "bbbbbbbbbbbb") || !strings.Contains(second, "alice-4") || !strings.Contains(second, "alice-8") || !strings.Contains(second, "分片") || !strings.Contains(second, "2/2") || strings.Contains(second, "Bob") {
 		t.Fatalf("second Alice card is not the split continuation: %s", second)
 	}
 	if !strings.Contains(third, "Bob") || strings.Contains(third, "Alice") {

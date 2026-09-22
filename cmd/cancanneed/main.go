@@ -30,6 +30,9 @@ func main() {
 }
 
 func run(arguments []string) error {
+	if err := ensureSupportedPlatform(); err != nil {
+		return err
+	}
 	if len(arguments) > 0 && arguments[0] == "__submit" {
 		return submission.Run(arguments[1:])
 	}

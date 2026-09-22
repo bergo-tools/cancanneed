@@ -50,6 +50,13 @@ func TestReviewBaseUsesFirstParentOrEmptyTree(t *testing.T) {
 	if reviewed != head {
 		t.Fatalf("review head = %s, want fetched head %s", reviewed, head)
 	}
+	info, err := repository.CommitInfo(context.Background(), head)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Commit != head || info.Author != "Test" || info.AuthorEmail != "test@example.com" || info.Subject != "update" || info.CommittedAt.IsZero() {
+		t.Fatalf("commit info = %#v", info)
+	}
 }
 
 func runTestGit(t *testing.T, dir string, args ...string) string {

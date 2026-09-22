@@ -26,17 +26,27 @@ type AgentResult struct {
 	Findings   []Finding `json:"findings"`
 }
 
+// CommitInfo is trusted metadata read from Git after the agent finishes.
+type CommitInfo struct {
+	Commit      string    `json:"commit"`
+	Author      string    `json:"author"`
+	AuthorEmail string    `json:"author_email"`
+	Subject     string    `json:"subject"`
+	CommittedAt time.Time `json:"committed_at"`
+}
+
 // Report adds trusted run metadata to an agent result.
 type Report struct {
-	Repository  string    `json:"repository"`
-	Branch      string    `json:"branch"`
-	FromSHA     string    `json:"from_sha"`
-	ToSHA       string    `json:"to_sha"`
-	Agent       string    `json:"agent"`
-	Verdict     string    `json:"verdict"`
-	Summary     string    `json:"summary"`
-	Findings    []Finding `json:"findings"`
-	GeneratedAt time.Time `json:"generated_at"`
+	Repository  string       `json:"repository"`
+	Branch      string       `json:"branch"`
+	FromSHA     string       `json:"from_sha"`
+	ToSHA       string       `json:"to_sha"`
+	Agent       string       `json:"agent"`
+	Verdict     string       `json:"verdict"`
+	Summary     string       `json:"summary"`
+	Findings    []Finding    `json:"findings"`
+	Commits     []CommitInfo `json:"commits,omitempty"`
+	GeneratedAt time.Time    `json:"generated_at"`
 }
 
 // ReviewFailureReport contains the stable fields shown in a failed-review notification.

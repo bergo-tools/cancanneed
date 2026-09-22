@@ -2,6 +2,8 @@
 
 `cancanneed` 是一个常驻的 Go 服务：轮询多个 Git 仓库，在受监控分支出现新提交时启动本地 coding agent 做增量 review，并把结构化结果发送成飞书卡片。
 
+支持 Linux 和 macOS；Windows 不受支持，程序启动时会直接返回错误。
+
 支持的 agent 预设：
 
 - `pi`：自动加入 `--approve`；`record_session: false` 时加入 `--no-session`
@@ -25,7 +27,7 @@
 9. 全部 commit 都可跳过时调用一次 `submit-review.sh skip --reason "..."` 后正常退出：推进 HEAD，但不发送飞书通知。
 10. agent 内部的单次执行失败按 `agent.retries` 和 `agent.retry_backoff` 回退重试；整轮 review 仍失败时保留原 HEAD，并在 `poll_interval` 后重新审查同一范围。服务正常取消或退出不会被计为 review 失败。
 11. 每个待审查 HEAD 首次失败会发送“Code Review失败通知”。同一 HEAD 持续失败时不逐次通知，只在累计第 30、60、90……次失败时再次报告累计失败及重试次数；review 成功后清空该 HEAD 的失败计数。
-12. 正常 review 成功后原子更新 state，并把结果加入持久化通知队列。飞书发送失败不会触发重复 review，也不会阻止后续 HEAD 继续审查；恢复后按队列顺序补发。结果卡片标题固定为“Code Review结果通知”，按 author 分组，每张卡片只包含一个作者，并在作者下面按 commit 展示 finding。同一作者超过 8 个 finding 时会拆成多张卡片；发送进度写入 state，中途失败后从第一张未成功的卡片继续。
+12. 正常 review 成功后，cancanneed 从本地 Git 读取 finding 对应 commit 的标题、作者、邮箱和提交时间，再原子更新 state 并把结果加入持久化通知队列。飞书发送失败不会触发重复 review，也不会阻止后续 HEAD 继续审查；恢复后按队列顺序补发。结果卡片标题固定为“Code Review结果通知”，按 Git 作者分组，每张卡片只包含一个作者，并在作者下面按 commit 展示 finding；同一 commit 的 finding 保证在同一张卡片中。拆卡时以 8 个 finding 为目标，但不会为了满足数量而拆散同一个 commit。发送进度写入 state，中途失败后从第一张未成功的卡片继续。
 
 ## 快速开始
 

@@ -27,6 +27,17 @@ type Feishu struct {
 
 const maxFindingsPerCard = 8
 
+type commitFindings struct {
+	commit   string
+	info     model.CommitInfo
+	findings []model.Finding
+}
+
+type authorCommits struct {
+	author  string
+	commits []commitFindings
+}
+
 func (f Feishu) NotificationCount(report model.Report) int {
 	return len(buildCards(report, f.AuthorMentions))
 }
@@ -103,38 +114,78 @@ func buildCards(report model.Report, mentions map[string]model.AuthorMention) []
 		return []map[string]any{buildSummaryCard(report)}
 	}
 
-	type authorFindings struct {
-		author   string
-		findings []model.Finding
+	commitInfo := make(map[string]model.CommitInfo, len(report.Commits))
+	for _, info := range report.Commits {
+		commitInfo[strings.ToLower(info.Commit)] = info
 	}
-	groups := make([]authorFindings, 0)
-	groupIndex := make(map[string]int)
+	commitOrder := make([]string, 0)
+	byCommit := make(map[string][]model.Finding)
 	for _, finding := range report.Findings {
-		author := strings.TrimSpace(finding.Author)
-		if author == "" {
-			author = "未知作者"
+		commit := strings.ToLower(strings.TrimSpace(finding.Commit))
+		if _, exists := byCommit[commit]; !exists {
+			commitOrder = append(commitOrder, commit)
 		}
-		index, exists := groupIndex[author]
+		byCommit[commit] = append(byCommit[commit], finding)
+	}
+
+	groups := make([]authorCommits, 0)
+	groupIndex := make(map[string]int)
+	for _, commit := range commitOrder {
+		info := commitInfo[commit]
+		author := strings.TrimSpace(info.Author)
+		if author == "" {
+			author = strings.TrimSpace(byCommit[commit][0].Author)
+			if author == "" {
+				author = "未知作者"
+			}
+		}
+		key := strings.ToLower(author)
+		index, exists := groupIndex[key]
 		if !exists {
 			index = len(groups)
-			groupIndex[author] = index
-			groups = append(groups, authorFindings{author: author})
+			groupIndex[key] = index
+			groups = append(groups, authorCommits{author: author})
 		}
-		groups[index].findings = append(groups[index].findings, finding)
+		groups[index].commits = append(groups[index].commits, commitFindings{commit: commit, info: info, findings: byCommit[commit]})
 	}
 
 	var cards []map[string]any
 	for _, group := range groups {
-		parts := (len(group.findings) + maxFindingsPerCard - 1) / maxFindingsPerCard
-		for part, start := 0, 0; start < len(group.findings); part, start = part+1, start+maxFindingsPerCard {
-			end := start + maxFindingsPerCard
-			if end > len(group.findings) {
-				end = len(group.findings)
-			}
-			cards = append(cards, buildAuthorCard(report, group.author, mentions[strings.ToLower(group.author)], group.findings[start:end], len(group.findings), part+1, parts))
+		parts := packCommitGroups(group.commits)
+		authorTotal := findingCount(group.commits)
+		for part, commits := range parts {
+			cards = append(cards, buildAuthorCard(report, group.author, mentions[strings.ToLower(group.author)], commits, authorTotal, part+1, len(parts)))
 		}
 	}
 	return cards
+}
+
+func packCommitGroups(commits []commitFindings) [][]commitFindings {
+	var parts [][]commitFindings
+	var current []commitFindings
+	currentFindings := 0
+	for _, commit := range commits {
+		count := len(commit.findings)
+		if len(current) != 0 && currentFindings+count > maxFindingsPerCard {
+			parts = append(parts, current)
+			current = nil
+			currentFindings = 0
+		}
+		current = append(current, commit)
+		currentFindings += count
+	}
+	if len(current) != 0 {
+		parts = append(parts, current)
+	}
+	return parts
+}
+
+func findingCount(commits []commitFindings) int {
+	total := 0
+	for _, commit := range commits {
+		total += len(commit.findings)
+	}
+	return total
 }
 
 func buildSummaryCard(report model.Report) map[string]any {
@@ -160,7 +211,7 @@ func buildSummaryCard(report model.Report) map[string]any {
 	return cardEnvelope(template, title, elements)
 }
 
-func buildAuthorCard(report model.Report, author string, mention model.AuthorMention, findings []model.Finding, authorTotal, part, parts int) map[string]any {
+func buildAuthorCard(report model.Report, author string, mention model.AuthorMention, commits []commitFindings, authorTotal, part, parts int) map[string]any {
 	template := "green"
 	switch report.Verdict {
 	case "request_changes":
@@ -183,32 +234,37 @@ func buildAuthorCard(report model.Report, author string, mention model.AuthorMen
 	elements := []any{markdownElement(fmt.Sprintf(
 		"**仓库：** %s\n**作者：** %s\n**分支：** %s\n**变更：** `%s` → `%s`\n**Agent：** %s\n**问题：** 本卡 %d 条，该作者共 %d 条%s\n\n%s",
 		escapeMarkdown(report.Repository), authorLabel, escapeMarkdown(report.Branch), short(report.FromSHA), short(report.ToSHA), escapeMarkdown(report.Agent),
-		len(findings), authorTotal, partLine, escapeMarkdown(truncate(report.Summary, 1200)),
+		findingCount(commits), authorTotal, partLine, escapeMarkdown(truncate(report.Summary, 1200)),
 	))}
 
-	commitOrder := make([]string, 0)
-	byCommit := make(map[string][]model.Finding)
-	for _, finding := range findings {
-		commit := strings.TrimSpace(finding.Commit)
-		if commit == "" {
-			commit = "未知 commit"
-		}
-		if _, exists := byCommit[commit]; !exists {
-			commitOrder = append(commitOrder, commit)
-		}
-		byCommit[commit] = append(byCommit[commit], finding)
-	}
-	for _, commit := range commitOrder {
-		commitLabel := commit
-		if commit != "未知 commit" {
-			commitLabel = "`" + escapeBackticks(short(commit)) + "`"
-		}
-		elements = append(elements, markdownElement("**Commit "+commitLabel+"**"))
-		for _, finding := range byCommit[commit] {
+	for _, commit := range commits {
+		elements = append(elements, markdownElement(formatCommitInfo(commit.commit, commit.info)))
+		for _, finding := range commit.findings {
 			elements = append(elements, markdownElement(formatFinding(finding)))
 		}
 	}
 	return cardEnvelope(template, title, elements)
+}
+
+func formatCommitInfo(commit string, info model.CommitInfo) string {
+	label := "未知 commit"
+	if commit != "" {
+		label = "`" + escapeBackticks(short(commit)) + "`"
+	}
+	content := "**Commit " + label + "**"
+	if info.Subject != "" {
+		content += "\n**标题：** " + escapeMarkdown(truncate(info.Subject, 300))
+	}
+	if info.Author != "" {
+		content += "\n**Git 作者：** " + escapeMarkdown(info.Author)
+		if info.AuthorEmail != "" {
+			content += " <`" + escapeBackticks(info.AuthorEmail) + "`>"
+		}
+	}
+	if !info.CommittedAt.IsZero() {
+		content += "\n**提交时间：** " + info.CommittedAt.Format("2006-01-02 15:04:05 -07:00")
+	}
+	return content
 }
 
 func buildFailureCard(report model.ReviewFailureReport) map[string]any {

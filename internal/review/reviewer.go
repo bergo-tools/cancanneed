@@ -104,6 +104,10 @@ func (r Reviewer) Review(ctx context.Context, request Request) (model.Report, st
 			return model.Report{}, runDir, fmt.Errorf("resolve completed review base: %w", err)
 		}
 	}
+	commits, err := collectCommitInfo(ctx, git, result.Findings)
+	if err != nil {
+		return model.Report{}, runDir, err
+	}
 	verdict := "approve"
 	summary := "未发现需要上报的重要问题"
 	if len(result.Findings) > 0 {
@@ -123,9 +127,28 @@ func (r Reviewer) Review(ctx context.Context, request Request) (model.Report, st
 		Verdict:     verdict,
 		Summary:     summary,
 		Findings:    result.Findings,
+		Commits:     commits,
 		GeneratedAt: r.Now().UTC(),
 	}
 	return report, runDir, nil
+}
+
+func collectCommitInfo(ctx context.Context, repository gitrepo.Repository, findings []model.Finding) ([]model.CommitInfo, error) {
+	commits := make([]model.CommitInfo, 0)
+	seen := make(map[string]struct{})
+	for _, finding := range findings {
+		commit := strings.ToLower(finding.Commit)
+		if _, exists := seen[commit]; exists {
+			continue
+		}
+		info, err := repository.CommitInfo(ctx, commit)
+		if err != nil {
+			return nil, err
+		}
+		seen[commit] = struct{}{}
+		commits = append(commits, info)
+	}
+	return commits, nil
 }
 
 // Cleanup removes old completed run directories for one repository.
@@ -252,7 +275,7 @@ func buildPrompt(request Request, submitPath string) string {
 1. commit 的标题或正文包含 noreview（忽略大小写）。
 2. 整个 commit 都是 vendor/第三方依赖更新或明显的自动化批量修改，例如几百上千个文件的生成代码同步、第三方代码同步、脚本批量替换等。只有部分文件属于这些类型时，仍然要审查其余人工修改。
 3. 对跳过的 commit 不要检查其具体改动，也不要提交 finding，更不要在摘要中逐项通知跳过情况。
-4. 如果范围内所有 commit 都可以跳过，必须先按执行规则完成退出前的最后一次 fetch，确认稳定后的全部 commit 仍都可跳过，再调用一次 %s skip --reason "<全部跳过的原因>" 并正常退出。cancanneed 会推进审查 HEAD，但不发送通知。
+4. 如果范围内所有 commit 都可以跳过，调用一次 %s skip --reason "<全部跳过的原因>" 并正常退出。cancanneed 会推进审查 HEAD，但不发送通知。
 
 问题上报标准：
 1. 只上报真正重要且可操作的问题：逻辑 bug、崩溃或异常、数据损坏、并发竞态、安全问题、资源泄漏和明显的接口误用。
