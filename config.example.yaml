@@ -1,0 +1,68 @@
+# 全局轮询间隔；启动后立即检查，整轮 review 失败后也按此间隔重试。
+poll_interval: 2m
+
+# 状态文件路径；相对路径以本配置文件所在目录为基准，同一时间只允许一个进程持有。
+state_file: .cancanneed/state.json
+
+# 每次 review 的日志、请求元数据和提交工具所在目录。
+runs_dir: .cancanneed/runs
+
+# Git author 到飞书用户的外部 JSON 映射文件；省略后只显示作者名，不执行 @。
+authors_file: authors.example.json
+
+# once 模式最多同时处理的仓库数；run 模式固定每个仓库一个 goroutine。
+concurrency: 4
+
+# 需要监控的仓库列表；这里仅提供一个项目示例。
+repositories:
+  # 唯一的示例仓库；name 同时作为 state 中的标识和通知中的仓库名。
+  - name: backend
+
+    # 本地 Git 工作区路径；支持环境变量，且相对路径以配置目录为基准。
+    path: /srv/repos/backend
+
+    # Git 远端名称；省略时默认为 origin。
+    remote: origin
+
+    # 监控分支；省略时依次尝试远端 HEAD、main 和 master。
+    branch: main
+
+    # 负责执行代码审查的 coding agent 配置。
+    agent:
+      # Agent 类型；可选 pi、ohmypi 或 crush，必须填写。
+      type: pi
+
+      # Agent 可执行文件；省略时按类型默认为 pi、omp 或 crush。
+      command: pi
+
+      # 传给 agent 的参数；{prompt} 会替换为中文审查提示。
+      # cancanneed 仍会自动加入该 agent 对应的自动批准参数。
+      args: ["-p", "{prompt}"]
+
+      # 是否保留原生 agent session；默认 false，仅 pi 和 ohmypi 支持。
+      record_session: false
+
+      # 单次 agent 进程执行超时；每次回退重试分别计时，默认 30m。
+      timeout: 30m
+
+      # 单次 review 失败后的进程内重试次数；默认 2，即最多执行 3 次。
+      retries: 2
+
+      # 两次 agent 执行之间的等待时间；默认 15s。
+      retry_backoff: 15s
+
+      # 注入 agent 子进程的环境变量；字符串中的 ${ENV_NAME} 会从当前环境展开。
+      env:
+        # 示例模型服务密钥；请通过 cancanneed 进程环境提供，不要写入真实密钥。
+        ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+
+# 飞书群自定义机器人配置；整个 feishu 段可省略，省略后不发送通知。
+feishu:
+  # 飞书群自定义机器人的 Webhook 地址。
+  webhook: ${FEISHU_WEBHOOK}
+
+  # 机器人启用“签名校验”时填写；未启用时可删除或留空。
+  secret: ${FEISHU_SECRET}
+
+  # 调用飞书 Webhook 的 HTTP 超时；默认 10s。
+  timeout: 10s
