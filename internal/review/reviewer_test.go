@@ -25,7 +25,8 @@ func TestBuildPromptUsesChineseInstructions(t *testing.T) {
 		"逐个检查范围内的所有新增 commit",
 		"只上报真正重要且可操作的问题",
 		"skip --reason",
-		"等待所有 finding 命令执行完成后直接正常退出",
+		"每次调用提交工具都必须检查退出码",
+		"等待所有 finding 命令成功执行完成后直接正常退出",
 	} {
 		if !strings.Contains(prompt, required) {
 			t.Fatalf("prompt does not contain %q:\n%s", required, prompt)
@@ -36,6 +37,13 @@ func TestBuildPromptUsesChineseInstructions(t *testing.T) {
 	}
 	if strings.Contains(strings.ToLower(prompt), "complete") {
 		t.Fatalf("prompt must not mention the removed complete command:\n%s", prompt)
+	}
+}
+
+func TestSubmitScriptPassesRepositoryForCommitValidation(t *testing.T) {
+	script := submitScript("/tmp/review.json", "/repo with spaces", []string{"/bin/cancanneed", "__submit"})
+	if !strings.Contains(script, "--repository '/repo with spaces'") {
+		t.Fatalf("submit script does not pass repository: %s", script)
 	}
 }
 

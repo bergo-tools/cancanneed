@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -27,6 +28,7 @@ func Run(arguments []string) error {
 	global := flag.NewFlagSet("__submit", flag.ContinueOnError)
 	global.SetOutput(io.Discard)
 	output := global.String("output", "", "review output path")
+	repository := global.String("repository", "", "reviewed Git repository path")
 	if err := global.Parse(arguments); err != nil {
 		return err
 	}
@@ -42,6 +44,12 @@ func Run(arguments []string) error {
 	case "finding":
 		finding, err := parseFinding(remaining[1:])
 		if err != nil {
+			return err
+		}
+		if strings.TrimSpace(*repository) == "" {
+			return errors.New("--repository is required for finding submissions")
+		}
+		if err := validateCommit(*repository, finding.Commit); err != nil {
 			return err
 		}
 		return update(*output, func(result *model.AgentResult) error {
@@ -70,6 +78,19 @@ func Run(arguments []string) error {
 	default:
 		return fmt.Errorf("unknown submission subcommand %q", remaining[0])
 	}
+}
+
+func validateCommit(repository, commit string) error {
+	command := exec.Command("git", "-C", repository, "cat-file", "-e", commit+"^{commit}")
+	output, err := command.CombinedOutput()
+	if err == nil {
+		return nil
+	}
+	detail := strings.TrimSpace(string(output))
+	if detail == "" {
+		detail = err.Error()
+	}
+	return fmt.Errorf("--commit %s does not identify an existing commit in repository: %s", commit, detail)
 }
 
 func parseFinding(arguments []string) (model.Finding, error) {

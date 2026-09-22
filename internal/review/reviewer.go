@@ -64,7 +64,7 @@ func (r Reviewer) Review(ctx context.Context, request Request) (model.Report, st
 		}
 		submitCommand = []string{executable, "__submit"}
 	}
-	if err := os.WriteFile(submitPath, []byte(submitScript(outputPath, submitCommand)), 0o700); err != nil {
+	if err := os.WriteFile(submitPath, []byte(submitScript(outputPath, request.Repository.Path, submitCommand)), 0o700); err != nil {
 		return model.Report{}, runDir, fmt.Errorf("write submit script: %w", err)
 	}
 	prompt := buildPrompt(request, submitPath)
@@ -239,15 +239,15 @@ func runBelongsToRepository(path, repository string) (bool, error) {
 	return metadata.Repository == repository, nil
 }
 
-func submitScript(outputPath string, command []string) string {
+func submitScript(outputPath, repositoryPath string, command []string) string {
 	quotedCommand := make([]string, len(command))
 	for i, argument := range command {
 		quotedCommand[i] = shellQuote(argument)
 	}
 	return fmt.Sprintf(`#!/bin/sh
 set -eu
-exec %s --output %s "$@"
-`, strings.Join(quotedCommand, " "), shellQuote(outputPath))
+exec %s --output %s --repository %s "$@"
+`, strings.Join(quotedCommand, " "), shellQuote(outputPath), shellQuote(repositoryPath))
 }
 
 func buildPrompt(request Request, submitPath string) string {
@@ -287,7 +287,8 @@ func buildPrompt(request Request, submitPath string) string {
 2. 自行使用 git fetch 拉取并检查变更，以 FETCH_HEAD 作为本次审查的最新终点。按需阅读相关上下文代码，不要运行测试，也不要写入，只进行review。
 3. 每发现一个符合上述上报标准的问题，调用一次下面的工具；多个问题可以并发提交：
    %s finding --author "<git show -s --format=%%an 得到的提交作者名称>" --commit "<完整提交 SHA>" --file "<仓库相对文件路径>" --line <新文件中的行号> --severity "<critical|high|medium|low|info>" --title "<问题标题>" --detail "<问题原因和修复建议>"
-4. 等待所有 finding 命令执行完成后直接正常退出。没有 finding 时也直接正常退出。
+4. 每次调用提交工具都必须检查退出码。如果工具报告参数错误或 commit 不存在，重新 fetch、确认完整 SHA、修正参数后再次调用；只有退出码为 0 才表示该 finding 提交成功。
+5. 等待所有 finding 命令成功执行完成后直接正常退出。没有 finding 时也直接正常退出。
 
 提交工具会创建并安全更新结构化 JSON 结果。不要自行创建或编辑 review.json
 `, introduction, coverage, shellCommand(submitPath), shellCommand(submitPath))
