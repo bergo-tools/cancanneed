@@ -38,6 +38,9 @@ repositories:
 	if cfg.StateDir != filepath.Join(dir, ".cancanneed", "state") {
 		t.Fatalf("state dir = %q", cfg.StateDir)
 	}
+	if cfg.MaxReviewRuns != 10 {
+		t.Fatalf("max review runs = %d", cfg.MaxReviewRuns)
+	}
 	if cfg.Repositories[0].Agent.Command != "omp" {
 		t.Fatalf("command = %q", cfg.Repositories[0].Agent.Command)
 	}
@@ -92,6 +95,17 @@ func TestLoadRejectsUnknownFields(t *testing.T) {
 	}
 	if _, err := Load(path); err == nil {
 		t.Fatal("expected an error")
+	}
+}
+
+func TestLoadRejectsInvalidMaxReviewRuns(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "bad.yaml")
+	contents := "max_review_runs: -1\nrepositories:\n  - name: api\n    path: ./repo\n    agent:\n      type: pi\n"
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil {
+		t.Fatal("expected max_review_runs validation error")
 	}
 }
 

@@ -7,6 +7,9 @@ state_dir: .cancanneed/state
 # 每次 review 的日志、请求元数据和提交工具所在目录。
 runs_dir: .cancanneed/runs
 
+# 每个仓库最多保留的 review 运行目录数量；默认 10，超出后删除最旧目录。
+max_review_runs: 10
+
 # Git author 到飞书用户的外部 JSON 映射文件；省略后只显示作者名，不执行 @。
 authors_file: authors.example.json
 

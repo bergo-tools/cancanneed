@@ -1,8 +1,12 @@
 package review
 
 import (
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"cancanneed/internal/config"
 )
@@ -32,6 +36,55 @@ func TestBuildPromptUsesChineseInstructions(t *testing.T) {
 	}
 	if strings.Contains(strings.ToLower(prompt), "complete") {
 		t.Fatalf("prompt must not mention the removed complete command:\n%s", prompt)
+	}
+}
+
+func TestCleanupKeepsNewestRunsForEachRepository(t *testing.T) {
+	runsDir := t.TempDir()
+	createRuns := func(repository string, count int) {
+		t.Helper()
+		for i := 0; i < count; i++ {
+			runDir := filepath.Join(runsDir, fmt.Sprintf("%s-%02d", repository, i))
+			if err := os.Mkdir(runDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			request := Request{Repository: config.Repository{Name: repository}}
+			if err := writeRequestMetadata(filepath.Join(runDir, "request.json"), request); err != nil {
+				t.Fatal(err)
+			}
+			modified := time.Unix(int64(i+1), 0)
+			if err := os.Chtimes(runDir, modified, modified); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	createRuns("api", 12)
+	createRuns("web", 3)
+	foreign := filepath.Join(runsDir, "unrelated")
+	if err := os.Mkdir(foreign, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	reviewer := Reviewer{RunsDir: runsDir, MaxRunsPerRepository: 10}
+	if err := reviewer.Cleanup("api"); err != nil {
+		t.Fatal(err)
+	}
+	for _, removed := range []string{"api-00", "api-01"} {
+		if _, err := os.Stat(filepath.Join(runsDir, removed)); !os.IsNotExist(err) {
+			t.Fatalf("old run %s was not removed", removed)
+		}
+	}
+	for _, retained := range []string{"api-02", "api-11", "web-00", "web-02", "unrelated"} {
+		if _, err := os.Stat(filepath.Join(runsDir, retained)); err != nil {
+			t.Fatalf("run %s should be retained: %v", retained, err)
+		}
+	}
+
+	if err := pruneRepositoryRuns(runsDir, "api", 9); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(runsDir, "api-02")); !os.IsNotExist(err) {
+		t.Fatal("cleanup before a new review did not make room for the next run")
 	}
 }
 

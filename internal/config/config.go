@@ -42,6 +42,7 @@ type Config struct {
 	PollInterval   Duration                       `yaml:"poll_interval"`
 	StateDir       string                         `yaml:"state_dir"`
 	RunsDir        string                         `yaml:"runs_dir"`
+	MaxReviewRuns  int                            `yaml:"max_review_runs"`
 	AuthorsFile    string                         `yaml:"authors_file,omitempty"`
 	AuthorMentions map[string]model.AuthorMention `yaml:"-"`
 	Concurrency    int                            `yaml:"concurrency"`
@@ -132,6 +133,9 @@ func (c *Config) applyDefaults(baseDir string) {
 	}
 	if c.RunsDir == "" {
 		c.RunsDir = ".cancanneed/runs"
+	}
+	if c.MaxReviewRuns == 0 {
+		c.MaxReviewRuns = 10
 	}
 	c.StateDir = expandedPath(baseDir, c.StateDir)
 	c.RunsDir = expandedPath(baseDir, c.RunsDir)
@@ -331,6 +335,9 @@ func (c Config) validate() error {
 	}
 	if c.RunsDir == "" {
 		problems = append(problems, errors.New("runs_dir cannot expand to an empty path"))
+	}
+	if c.MaxReviewRuns < 1 {
+		problems = append(problems, errors.New("max_review_runs must be at least 1"))
 	}
 	if len(c.Repositories) == 0 {
 		problems = append(problems, errors.New("at least one repository is required"))

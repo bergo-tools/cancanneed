@@ -80,7 +80,7 @@ func run(arguments []string) error {
 	service := &app.App{
 		Config:   cfg,
 		State:    store,
-		Reviewer: review.Reviewer{RunsDir: cfg.RunsDir, Runner: agent.Runner{}},
+		Reviewer: review.Reviewer{RunsDir: cfg.RunsDir, MaxRunsPerRepository: cfg.MaxReviewRuns, Runner: agent.Runner{}},
 		Notifier: notifier,
 		Logger:   logger,
 	}

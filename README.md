@@ -16,7 +16,7 @@
 
 1. 常驻模式为每个仓库启动一个独立 goroutine。每个 goroutine 启动后立即检查一次；本轮检查或 review 完成后等待 `poll_interval`，再检查下一次。单个仓库的慢 review 不会阻塞其他仓库，同一仓库也不会出现重叠 review。
 2. 第一次看到仓库、state 中没有历史 HEAD，或监控分支发生切换时，只 review agent 最终 fetch 到的最新一个 commit：普通提交以第一父提交为对比起点，根提交以 Git 空树为起点。review 成功后才把该现场的 `FETCH_HEAD` 写入 state，不会回溯审查整个历史。
-3. HEAD 改变后生成一次运行目录，里面只包含运行元数据、日志、`submit-review.sh` 和最终的 `review.json`；不会生成 `prepare-review.sh` 或 `prompt.md`。
+3. HEAD 改变后生成一次运行目录，里面只包含运行元数据、日志、`submit-review.sh` 和最终的 `review.json`；不会生成 `prepare-review.sh` 或 `prompt.md`。`max_review_runs` 控制每个仓库最多保留多少个运行目录，默认 `10`，启动检查和新 review 前都会删除该仓库最旧的超额目录，不影响其他仓库。
 4. cancanneed 把上次 HEAD 注入 prompt 和 `CANCANNEED_FROM_SHA`，并通过 `CANCANNEED_REMOTE`、`CANCANNEED_BRANCH` 提供目标远端与分支。agent 自己 fetch 远端并完成增量对比，退出前再次 fetch；如果 `FETCH_HEAD` 变化就继续检查。agent 正常退出后，cancanneed 直接读取本地 `FETCH_HEAD` 作为实际审查终点，不会再查询远端并误记审查结束后才出现的提交。
 5. agent 逐个覆盖范围内的 commit，并首先读取仓库根目录下忽略大小写匹配的 `review.md`。只上报逻辑错误、崩溃、数据损坏、并发、安全、资源泄漏、明显接口误用等真正重要的问题。
 6. 标题或正文带 `noreview` 的 commit，以及完全由 vendor/第三方同步或明显自动化批量修改组成的 commit 可以跳过；混合 commit 仍需检查其中的人工修改。

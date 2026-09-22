@@ -3,10 +3,12 @@ package review
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -25,10 +27,11 @@ type Request struct {
 }
 
 type Reviewer struct {
-	RunsDir       string
-	Runner        agent.Runner
-	SubmitCommand []string
-	Now           func() time.Time
+	RunsDir              string
+	MaxRunsPerRepository int
+	Runner               agent.Runner
+	SubmitCommand        []string
+	Now                  func() time.Time
 }
 
 func (r Reviewer) Review(ctx context.Context, request Request) (model.Report, string, error) {
@@ -37,8 +40,18 @@ func (r Reviewer) Review(ctx context.Context, request Request) (model.Report, st
 	}
 	runID := fmt.Sprintf("%s-%s-%d", safeName(request.Repository.Name), shortSHA(request.ObservedSHA), r.Now().UnixNano())
 	runDir := filepath.Join(r.RunsDir, runID)
-	if err := os.MkdirAll(runDir, 0o700); err != nil {
+	if err := os.MkdirAll(r.RunsDir, 0o700); err != nil {
+		return model.Report{}, "", fmt.Errorf("create runs directory: %w", err)
+	}
+	if err := pruneRepositoryRuns(r.RunsDir, request.Repository.Name, r.maxRuns()-1); err != nil {
+		return model.Report{}, "", err
+	}
+	if err := os.Mkdir(runDir, 0o700); err != nil {
 		return model.Report{}, "", fmt.Errorf("create run directory: %w", err)
+	}
+	if err := writeRequestMetadata(filepath.Join(runDir, "request.json"), request); err != nil {
+		_ = os.RemoveAll(runDir)
+		return model.Report{}, "", err
 	}
 
 	submitPath := filepath.Join(runDir, "submit-review.sh")
@@ -55,9 +68,6 @@ func (r Reviewer) Review(ctx context.Context, request Request) (model.Report, st
 		return model.Report{}, runDir, fmt.Errorf("write submit script: %w", err)
 	}
 	prompt := buildPrompt(request, submitPath)
-	if err := writeRequestMetadata(filepath.Join(runDir, "request.json"), request); err != nil {
-		return model.Report{}, runDir, err
-	}
 
 	result, err := r.Runner.Execute(ctx, agent.Request{
 		Agent:      request.Repository.Agent,
@@ -116,6 +126,94 @@ func (r Reviewer) Review(ctx context.Context, request Request) (model.Report, st
 		GeneratedAt: r.Now().UTC(),
 	}
 	return report, runDir, nil
+}
+
+// Cleanup removes old completed run directories for one repository.
+func (r Reviewer) Cleanup(repository string) error {
+	if err := os.MkdirAll(r.RunsDir, 0o700); err != nil {
+		return fmt.Errorf("create runs directory: %w", err)
+	}
+	return pruneRepositoryRuns(r.RunsDir, repository, r.maxRuns())
+}
+
+func (r Reviewer) maxRuns() int {
+	if r.MaxRunsPerRepository < 1 {
+		return 10
+	}
+	return r.MaxRunsPerRepository
+}
+
+type runDirectory struct {
+	path       string
+	name       string
+	modifiedAt time.Time
+}
+
+func pruneRepositoryRuns(runsDir, repository string, keep int) error {
+	entries, err := os.ReadDir(runsDir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("list review run directories: %w", err)
+	}
+	var candidates []runDirectory
+	prefix := safeName(repository) + "-"
+	for _, entry := range entries {
+		if !entry.IsDir() || !strings.HasPrefix(entry.Name(), prefix) {
+			continue
+		}
+		path := filepath.Join(runsDir, entry.Name())
+		belongs, err := runBelongsToRepository(filepath.Join(path, "request.json"), repository)
+		if err != nil {
+			return err
+		}
+		if !belongs {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return fmt.Errorf("read review run directory %s: %w", path, err)
+		}
+		candidates = append(candidates, runDirectory{path: path, name: entry.Name(), modifiedAt: info.ModTime()})
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		if candidates[i].modifiedAt.Equal(candidates[j].modifiedAt) {
+			return candidates[i].name < candidates[j].name
+		}
+		return candidates[i].modifiedAt.Before(candidates[j].modifiedAt)
+	})
+	removeCount := len(candidates) - keep
+	for i := 0; i < removeCount; i++ {
+		if err := os.RemoveAll(candidates[i].path); err != nil {
+			return fmt.Errorf("remove old review run directory %s: %w", candidates[i].path, err)
+		}
+	}
+	return nil
+}
+
+func runBelongsToRepository(path, repository string) (bool, error) {
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("inspect review request metadata %s: %w", path, err)
+	}
+	if !info.Mode().IsRegular() || info.Size() > 64<<10 {
+		return false, nil
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return false, fmt.Errorf("read review request metadata %s: %w", path, err)
+	}
+	var metadata struct {
+		Repository string `json:"repository"`
+	}
+	if err := json.Unmarshal(b, &metadata); err != nil || metadata.Repository == "" {
+		return false, nil
+	}
+	return metadata.Repository == repository, nil
 }
 
 func submitScript(outputPath string, command []string) string {

@@ -103,6 +103,9 @@ func (a *App) runRepository(ctx context.Context, repository config.Repository) e
 }
 
 func (a *App) processRepository(ctx context.Context, repository config.Repository) error {
+	if err := a.Reviewer.Cleanup(repository.Name); err != nil {
+		return fmt.Errorf("clean old review runs: %w", err)
+	}
 	current, exists := a.State.Get(repository.Name)
 	var pendingDeliveryErr error
 	if exists && len(current.PendingNotifications) != 0 {
