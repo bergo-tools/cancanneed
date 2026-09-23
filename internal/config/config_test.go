@@ -50,7 +50,7 @@ repositories:
 	if cfg.Repositories[0].Agent.RecordSession {
 		t.Fatal("record_session should default to false")
 	}
-	if cfg.Repositories[0].Agent.Timeout.Value() != 30*time.Minute {
+	if cfg.Repositories[0].Agent.Timeout.Value() != time.Hour {
 		t.Fatalf("timeout = %s", cfg.Repositories[0].Agent.Timeout.Value())
 	}
 	if cfg.Repositories[0].Agent.RetryCount() != 2 {

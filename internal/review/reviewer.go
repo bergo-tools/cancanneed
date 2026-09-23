@@ -274,28 +274,26 @@ func buildPrompt(request Request, submitPath string) string {
 1. %s
 2. 如果仓库根目录存在名为 review.md 的文件（忽略文件名大小写），开始审查前必须先读取并遵守其中针对本仓库的审查要求。
 
-只允许跳过以下 commit：
-1. commit 的标题或正文包含 noreview（忽略大小写）。
-2. 整个 commit 都是 vendor/第三方依赖更新或明显的自动化批量修改，例如几百上千个文件的生成代码同步、第三方代码同步、脚本批量替换等。只有部分文件属于这些类型时，仍然要审查其余人工修改。
-3. 对跳过的 commit 不要检查其具体改动，也不要提交 finding，更不要在摘要中逐项通知跳过情况。
-4. 如果范围内所有 commit 都可以跳过，调用一次 %s skip --reason "<全部跳过的原因>" 并正常退出。cancanneed 会推进审查 HEAD，但不发送通知。
-
 问题上报标准：
 1. 只上报真正重要且可操作的问题：逻辑 bug、崩溃或异常、数据损坏、并发竞态、安全问题、资源泄漏和明显的接口误用。
 2. 忽略代码风格、命名、注释、格式以及纯重构偏好等小问题。
 3. 必须结合改动上下文，包括调用方、被调用方和相关函数，确认问题确实存在并尽量避免误报。证据不足时不要上报。
 4. 每条 finding 的标题和详情尽量使用简洁、精准的中文：标题直指具体问题；详情只说明触发条件、实际后果和必要的修复方向，避免空泛措辞、重复背景和冗长推测。
 
+跳过以下 commit：
+1. commit 的标题或正文包含 noreview（忽略大小写）。
+2. 整个 commit 都是 vendor/第三方依赖更新或明显的自动化批量修改，例如几百上千个文件的生成代码同步、第三方代码同步、脚本批量替换等。只有部分文件属于这些类型时，仍然要审查其余人工修改。
+3. 对跳过的 commit 不要检查其具体改动，也不要提交 finding，更不要在摘要中逐项通知跳过情况。
+4. 如果范围内所有 commit 都可以跳过，调用一次 %s skip --reason "<全部跳过的原因>" 并正常退出。
+
 执行规则：
 1. 不要编辑仓库文件、创建提交、切换分支或推送任何内容。
 2. 自行使用 git fetch 拉取并检查变更，以 FETCH_HEAD 作为本次审查的最新终点。按需阅读相关上下文代码，不要运行测试，也不要写入，只进行review。
 3. 如果 git fetch 因网络、认证、权限等原因失败，立即调用 %s fetch-failed --reason "<简洁的 Git 错误>"；确认命令成功后停止审查并正常退出。不要沿用旧的 FETCH_HEAD，也不要继续提交 finding。cancanneed 会把本轮记为审查失败。
 4. 每发现一个符合上述上报标准的问题，调用一次下面的工具；多个问题可以并发提交：
-   %s finding --author "<git show -s --format=%%an 得到的提交作者名称>" --commit "<完整提交 SHA>" --file "<仓库相对文件路径>" --line <新文件中的行号> --severity "<critical|high|medium|low|info>" --title "<问题标题>" --detail "<问题原因和修复建议>"
-5. 每次调用提交工具都必须检查退出码。如果工具报告参数错误或 commit 不存在，重新 fetch、确认完整 SHA、修正参数后再次调用；只有退出码为 0 才表示该 finding 提交成功。若重新 fetch 失败，按第 3 条报告失败。
+   %s finding --author "<git show -s --format=%%an 得到的提交作者名称>" --commit "<完整提交 SHA>" --file "<仓库相对文件路径>" --line <新文件中的行号> --severity "<critical|high|medium>" --title "<问题标题>" --detail "<问题原因和修复建议>"
+5. 每次调用提交工具都必须检查退出码。如果工具报告参数错误或 commit 不存在, 确认完整 SHA、修正参数后再次调用；只有退出码为 0 才表示该 finding 提交成功。
 6. 等待所有 finding 命令成功执行完成后直接正常退出。没有 finding 时也直接正常退出。
-
-提交工具会创建并安全更新结构化 JSON 结果。不要自行创建或编辑 review.json
 `, introduction, coverage, shellCommand(submitPath), shellCommand(submitPath), shellCommand(submitPath))
 }
 

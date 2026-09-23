@@ -18,7 +18,7 @@ import (
 
 const (
 	defaultPollInterval = 5 * time.Minute
-	defaultAgentTimeout = 30 * time.Minute
+	defaultAgentTimeout = time.Hour
 	defaultRetryBackoff = 15 * time.Second
 )
 

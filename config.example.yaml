@@ -45,8 +45,8 @@ repositories:
       # 是否保留原生 agent session；默认 false，仅 pi 和 ohmypi 支持。
       record_session: false
 
-      # 单次 agent 进程执行超时；每次回退重试分别计时，默认 30m。
-      timeout: 30m
+      # 单次 agent 进程执行超时；每次回退重试分别计时，默认 1h。
+      timeout: 1h
 
       # 单次 review 失败后的进程内重试次数；默认 2，即最多执行 3 次。
       retries: 2

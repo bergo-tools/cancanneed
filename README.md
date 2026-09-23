@@ -52,7 +52,7 @@ repositories:
 | `ohmypi` | `omp` | `--auto-approve` | 默认加入 `--no-session`。 |
 | `crush` | `crush` | `--yolo` | 不支持关闭 session，沿用自身行为。 |
 
-`record_session` 默认为 `false`；设为 `true` 时，pi 和 ohmypi 不再加入 `--no-session`。`timeout` 默认为每次执行 `30m`；`retries` 默认为 `2`，即最多运行三次；`retry_backoff` 默认为 `15s`。执行超时或服务收到终止信号时，程序会终止 agent 进程组。
+`record_session` 默认为 `false`；设为 `true` 时，pi 和 ohmypi 不再加入 `--no-session`。`timeout` 默认为每次执行 `1h`；`retries` 默认为 `2`，即最多运行三次；`retry_backoff` 默认为 `15s`。执行超时或服务收到终止信号时，程序会终止 agent 进程组。
 
 Agent 子进程继承 cancanneed 的环境变量，还可通过 `agent.env` 覆盖或增加变量。例如 `ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}` 会从服务进程环境传入密钥。中文审查 prompt 直接作为命令行参数传入，不生成 prompt 文件；自定义 `args` 可使用 `{prompt}`、`{repo}`、`{branch}`、`{from_sha}`、`{submit_script}`、`{output}` 占位符。
 
