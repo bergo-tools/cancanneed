@@ -93,6 +93,37 @@ func TestFindingRejectsCommitMissingFromRepository(t *testing.T) {
 	}
 }
 
+func TestFindingAcceptsCommitWhenGitWritesToStderr(t *testing.T) {
+	repository, commit := createTestRepository(t)
+	t.Setenv("GIT_TRACE", "1")
+	output := filepath.Join(t.TempDir(), "review.json")
+	if err := Run([]string{
+		"--output", output,
+		"--repository", repository,
+		"finding",
+		"--author", "Alice",
+		"--commit", commit,
+		"--file", "main.go",
+		"--line", "1",
+		"--severity", "high",
+		"--title", "title",
+		"--detail", "detail",
+	}); err != nil {
+		t.Fatalf("valid commit rejected with GIT_TRACE enabled: %v", err)
+	}
+	b, err := os.ReadFile(output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result model.AgentResult
+	if err := json.Unmarshal(b, &result); err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Findings) != 1 || result.Findings[0].Commit != commit {
+		t.Fatalf("submitted findings = %#v", result.Findings)
+	}
+}
+
 func TestFindingRejectsAnnotatedTagObject(t *testing.T) {
 	repository, _ := createTestRepository(t)
 	runTestGit(t, repository, "-c", "user.name=Test", "-c", "user.email=test@example.com", "tag", "-a", "review-tag", "-m", "test tag")

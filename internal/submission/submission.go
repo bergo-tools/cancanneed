@@ -82,15 +82,17 @@ func Run(arguments []string) error {
 
 func validateCommit(repository, commit string) error {
 	command := exec.Command("git", "-C", repository, "cat-file", "-t", commit)
-	output, err := command.CombinedOutput()
-	if err != nil {
-		detail := strings.TrimSpace(string(output))
+	var stdout, stderr bytes.Buffer
+	command.Stdout = &stdout
+	command.Stderr = &stderr
+	if err := command.Run(); err != nil {
+		detail := strings.TrimSpace(stderr.String())
 		if detail == "" {
 			detail = err.Error()
 		}
 		return fmt.Errorf("--commit %s does not identify an existing commit in repository: %s", commit, detail)
 	}
-	if objectType := strings.TrimSpace(string(output)); objectType != "commit" {
+	if objectType := strings.TrimSpace(stdout.String()); objectType != "commit" {
 		return fmt.Errorf("--commit %s identifies a %s object, not a commit; use the commit SHA instead", commit, objectType)
 	}
 	return nil
