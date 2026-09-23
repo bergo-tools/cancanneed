@@ -42,6 +42,7 @@ func run(arguments []string) error {
 		arguments = arguments[1:]
 	}
 	flags := flag.NewFlagSet(command, flag.ContinueOnError)
+	flags.Usage = func() { fmt.Fprint(flags.Output(), usageText()) }
 	configPath := flags.String("config", "cancanneed.yaml", "path to YAML configuration")
 	debug := flags.Bool("debug", false, "enable debug logs")
 	if err := flags.Parse(arguments); err != nil {
@@ -113,6 +114,46 @@ func run(arguments []string) error {
 		logger.Info("cancanneed stopped")
 	}
 	return err
+}
+
+func usageText() string {
+	return `cancanneed：定期检查 Git 仓库，调用 coding agent 审查新增提交。
+
+用法：
+  cancanneed [run] [选项]     持续运行；每个仓库独立轮询（默认）
+  cancanneed once [选项]      检查所有仓库一次后退出
+
+选项：
+  -config PATH              YAML 配置文件路径（默认 cancanneed.yaml）
+  -debug                    输出调试日志
+  -h, --help                显示本帮助；也可用于 run 和 once
+
+快速开始：
+  cp config.example.yaml cancanneed.yaml
+  # 修改仓库路径、agent 和可选的飞书配置
+  cancanneed run -config cancanneed.yaml
+  cancanneed once -config cancanneed.yaml
+
+最小配置示例：
+  repositories:
+    - name: backend
+      path: /path/to/git-repository
+      agent:
+        type: pi
+
+配置要点：
+  repositories       可配置多个仓库；agent.type 支持 pi、ohmypi、crush
+  poll_interval      run 模式的检查间隔，默认 5m；失败后也按此间隔重试
+  concurrency        once 模式的并发仓库数，默认 4
+  state_dir          每仓库独立保存 HEAD 和通知进度，默认 .cancanneed/state
+  runs_dir           review 临时文件和日志目录，默认 .cancanneed/runs
+  max_review_runs    每仓库保留的运行目录数，默认 10
+  authors_file       可选的作者到飞书用户映射 JSON 文件
+  feishu.webhook     可选的飞书群机器人 Webhook；未配置则不发送通知
+
+首次审查只检查监控分支的最新一个 commit；之后从已记录的 HEAD 增量审查。
+配置中的相对路径以配置文件目录为基准。完整字段和注释见 config.example.yaml。
+`
 }
 
 func logLoadedConfig(logger *slog.Logger, path, mode string, cfg config.Config) {

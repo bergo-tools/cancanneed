@@ -1,64 +1,66 @@
 # cancanneed（看看你的）
 
-`cancanneed` 是一个常驻的 Go 服务：轮询多个 Git 仓库，在受监控分支出现新提交时启动本地 coding agent 做增量 review，并把结构化结果发送成飞书卡片。
+`cancanneed` 定期检查 Git 仓库的新提交，调用本地 coding agent 做代码审查，并通过飞书群机器人发送结果。可以同时监控多个仓库；每个仓库独立保存审查进度。
 
-支持 Linux 和 macOS；Windows 不受支持，程序启动时会直接返回错误。
-
-支持的 agent 预设：
-
-- `pi`：自动加入 `--approve`；`record_session: false` 时加入 `--no-session`
-- `ohmypi`：自动加入 `--auto-approve`；`record_session: false` 时加入 `--no-session`
-- `crush`：自动以 `crush --yolo run ...` 运行；当前不支持关闭 session
-
-每个预设都可以覆盖 `command` 和 `args`，因此 CLI 版本差异不需要改代码；cancanneed 仍会规范化并加入对应 agent 的自动批准参数。`args` 支持 `{prompt}`、`{repo}`、`{branch}`、`{from_sha}`、`{submit_script}` 和 `{output}` 占位符。Prompt 直接作为进程参数传给 agent，不落地成文件。
-
-`agent.record_session` 默认为 `false`，仅对原生支持 `--no-session` 的 pi 和 ohmypi 生效；设为 `true` 时保留它们的 session。Crush 没有该参数，因此保持 Crush 自身的 session 行为。`agent.timeout` 控制单次 agent 进程的最长执行时间，默认 `30m`，每次 `agent.retries` 重试分别计算超时；Linux/macOS 下超时或服务取消会终止整个 agent 进程组，避免其测试和 shell 子进程残留。
-
-## 工作流
-
-1. 常驻模式为每个仓库启动一个独立 goroutine。每个 goroutine 启动后立即检查一次；本轮检查或 review 完成后等待 `poll_interval`，再检查下一次。单个仓库的慢 review 不会阻塞其他仓库，同一仓库也不会出现重叠 review。
-2. 第一次看到仓库、state 中没有历史 HEAD，或监控分支发生切换时，只 review agent 最终 fetch 到的最新一个 commit：普通提交以第一父提交为对比起点，根提交以 Git 空树为起点。review 成功后才把该现场的 `FETCH_HEAD` 写入 state，不会回溯审查整个历史。
-3. HEAD 改变后生成一次运行目录，里面只包含运行元数据、日志、`submit-review.sh` 和最终的 `review.json`；不会生成 `prepare-review.sh` 或 `prompt.md`。`max_review_runs` 控制每个仓库最多保留多少个运行目录，默认 `10`，启动检查和新 review 前都会删除该仓库最旧的超额目录，不影响其他仓库。
-4. cancanneed 把上次 HEAD 注入 prompt 和 `CANCANNEED_FROM_SHA`，并通过 `CANCANNEED_REMOTE`、`CANCANNEED_BRANCH` 提供目标远端与分支。agent 自己 fetch 远端并完成增量对比，退出前再次 fetch；如果 `FETCH_HEAD` 变化就继续检查。agent 正常退出后，cancanneed 直接读取本地 `FETCH_HEAD` 作为实际审查终点，不会再查询远端并误记审查结束后才出现的提交。
-5. agent 逐个覆盖范围内的 commit，并首先读取仓库根目录下忽略大小写匹配的 `review.md`。只上报逻辑错误、崩溃、数据损坏、并发、安全、资源泄漏、明显接口误用等真正重要的问题。
-6. 标题或正文带 `noreview` 的 commit，以及完全由 vendor/第三方同步或明显自动化批量修改组成的 commit 可以跳过；混合 commit 仍需检查其中的人工修改。
-7. 每发现一个问题，agent 调用一次 `submit-review.sh finding ...`，传入 author、commit、文件、行号、严重级别、标题和说明。不同 finding 可以并发提交；工具通过跨进程锁和原子替换避免丢失更新。
-8. 所有 finding 提交完成后，agent 直接正常退出，不需要调用 `complete`。退出码为 0 就表示本次 review 完成；没有 finding 时不需要生成 `review.json`。
-9. 全部 commit 都可跳过时调用一次 `submit-review.sh skip --reason "..."` 后正常退出：推进 HEAD，但不发送飞书通知。
-10. agent 内部的单次执行失败按 `agent.retries` 和 `agent.retry_backoff` 回退重试；整轮 review 仍失败时保留原 HEAD，并在 `poll_interval` 后重新审查同一范围。服务正常取消或退出不会被计为 review 失败。
-11. 每个待审查 HEAD 首次失败会发送“Code Review失败通知”。同一 HEAD 持续失败时不逐次通知，只在累计第 30、60、90……次失败时再次报告累计失败及重试次数；review 成功后清空该 HEAD 的失败计数。
-12. 正常 review 成功后，cancanneed 从本地 Git 读取 finding 对应 commit 的标题、作者、邮箱和提交时间，再原子更新 state 并把结果加入持久化通知队列。飞书发送失败不会触发重复 review，也不会阻止后续 HEAD 继续审查；恢复后按队列顺序补发。结果卡片标题固定为“Code Review结果通知”，按 Git 作者分组，每张卡片只包含一个作者，并在作者下面按 commit 展示 finding；同一 commit 的 finding 保证在同一张卡片中。拆卡时以 8 个 finding 为目标，但不会为了满足数量而拆散同一个 commit。发送进度写入 state，中途失败后从第一张未成功的卡片继续。
+支持 Linux 和 macOS。Windows 启动时会直接报错。
 
 ## 快速开始
 
+准备好本地 Git 仓库，以及 `pi`、`ohmypi` 或 `crush` 中至少一个 agent 的可执行文件。复制带注释的 [config.example.yaml](config.example.yaml)，修改仓库路径和 agent；不使用飞书时删除示例中的 `feishu` 和 `authors_file` 配置：
+
 ```bash
 cp config.example.yaml cancanneed.yaml
+# 编辑 cancanneed.yaml 中的仓库路径、agent 及可选通知配置
 go build -o cancanneed ./cmd/cancanneed
 ./cancanneed run -config cancanneed.yaml
 ```
 
-只执行一轮，适合 cron、调试或首次审查最新 commit：
+最小配置只需要仓库名称、路径和 agent 类型：
 
-```bash
-./cancanneed once -config cancanneed.yaml
+```yaml
+repositories:
+  - name: backend
+    path: /srv/repos/backend
+    agent:
+      type: pi
 ```
 
-`once` 模式会按 `concurrency` 限制并行仓库数；常驻 `run` 模式固定为每个仓库一个 goroutine。
+`run` 是默认模式：每个仓库由一个 goroutine 独立处理，启动后立即检查一次，之后在每轮检查或审查结束后等待 `poll_interval`。只想检查一轮时运行 `./cancanneed once -config cancanneed.yaml`；它会按 `concurrency` 限制并行仓库数。`./cancanneed --help` 可查看命令用法。
 
-`state_dir` 默认为配置文件目录下的 `.cancanneed/state`。每个仓库独立保存状态，例如：
+## 配置
 
-```text
-.cancanneed/state/backend.json
-.cancanneed/state/frontend.json
-```
+配置文件使用 YAML，未知字段会报错。相对路径以配置文件所在目录为基准；路径、`agent.env` 的值及飞书凭据中的 `${ENV_NAME}` 从 cancanneed 进程环境中展开。完整字段和每项注释见 [config.example.yaml](config.example.yaml)。
 
-每个文件只包含对应仓库的 HEAD、失败计数和通知队列。停止 cancanneed 后，可以单独删除某个 JSON，让该仓库下次按“无历史 HEAD”处理，而不影响其他仓库。普通字母、数字、点、下划线和连字符组成的仓库名会直接作为文件名；其他名称会转换成安全名称并附加稳定哈希，避免冲突。
+| 配置项 | 作用与默认值 |
+| --- | --- |
+| `repositories` | 监控的仓库列表，至少一个；每项的 `name` 必须唯一，`path` 指向本地 Git 工作区。 |
+| `repositories[].remote` / `branch` | 远端默认 `origin`；未指定分支时依次尝试远端 HEAD、`main`、`master`。 |
+| `poll_interval` | 每个仓库两轮检查之间的间隔，默认 `5m`；整轮审查失败后也按此间隔重试。 |
+| `concurrency` | `once` 模式同时处理的仓库数，默认 `4`；`run` 模式每仓库一个 goroutine。 |
+| `state_dir` / `runs_dir` | 默认为 `.cancanneed/state` 和 `.cancanneed/runs`。 |
+| `max_review_runs` | 每个仓库最多保留的审查运行目录数，默认 `10`。 |
+| `authors_file` | 可选的 Git 作者到飞书用户映射 JSON 文件。 |
+| `feishu` | 可选的飞书群机器人配置；省略后继续审查并记录进度，但不发送消息。 |
 
-每个仓库状态有独立进程锁。同一个仓库不能被两个 `run`/`once` 实例同时监控，但只要仓库集合不重叠，多个实例可以共用同一 `state_dir`。
+### Agent
 
-配置使用严格 YAML，未知字段会被拒绝。相对路径以配置文件所在目录为基准，字符串中的 `${ENV_NAME}` 会从 cancanneed 进程的环境变量展开。完整配置见 [config.example.yaml](config.example.yaml)，其中只保留一个示例仓库并为每个配置项提供了注释。
+`repositories[].agent.type` 支持以下预设。程序会为 agent 加入自动批准参数，`command` 和 `args` 可以覆盖各自的默认命令与参数。
 
-可通过顶层 `authors_file` 指向一个外部 JSON 文件，把 Git author 映射为飞书用户。示例见 [authors.example.json](authors.example.json)：
+| 类型 | 默认命令 | 自动批准参数 | Session 行为 |
+| --- | --- | --- | --- |
+| `pi` | `pi` | `--approve` | 默认加入 `--no-session`。 |
+| `ohmypi` | `omp` | `--auto-approve` | 默认加入 `--no-session`。 |
+| `crush` | `crush` | `--yolo` | 不支持关闭 session，沿用自身行为。 |
+
+`record_session` 默认为 `false`；设为 `true` 时，pi 和 ohmypi 不再加入 `--no-session`。`timeout` 默认为每次执行 `30m`；`retries` 默认为 `2`，即最多运行三次；`retry_backoff` 默认为 `15s`。执行超时或服务收到终止信号时，程序会终止 agent 进程组。
+
+Agent 子进程继承 cancanneed 的环境变量，还可通过 `agent.env` 覆盖或增加变量。例如 `ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}` 会从服务进程环境传入密钥。中文审查 prompt 直接作为命令行参数传入，不生成 prompt 文件；自定义 `args` 可使用 `{prompt}`、`{repo}`、`{branch}`、`{from_sha}`、`{submit_script}`、`{output}` 占位符。
+
+### 飞书与作者映射
+
+`feishu.webhook` 填飞书群自定义机器人的 Webhook 地址；启用了签名校验时再填 `feishu.secret`。这里不需要飞书应用的 App ID 或 App Secret。HTTP 超时 `feishu.timeout` 默认 `10s`。
+
+通过 `authors_file` 可以在结果卡片里 @ 提交作者。文件格式见 [authors.example.json](authors.example.json)：
 
 ```json
 {
@@ -69,13 +71,21 @@ go build -o cancanneed ./cmd/cancanneed
 }
 ```
 
-JSON 顶层 key 必须与 finding 中的 Git author 名称对应，匹配时忽略首尾空白和大小写；`feishu_id` 和 `name` 都是必填项。匹配成功后，作者卡片会显示并 @ 对应飞书用户；没有匹配时继续显示原始 Git author，不影响卡片发送。
+顶层 key 对应 Git author 名称，匹配时忽略首尾空白和大小写；`feishu_id`、`name` 都必填。找不到映射时仍显示原始作者名。
 
-`feishu.webhook` 填飞书群自定义机器人的 Webhook 地址（`https://open.feishu.cn/open-apis/bot/v2/hook/...`），cancanneed 会直接向该机器人发送交互式卡片；不需要飞书应用的 App ID 或 App Secret。机器人如果启用了“签名校验”，再配置对应的 `feishu.secret`。不配置 `feishu` 时仍会完成 review 和状态推进，只是不发送消息。
+## 审查如何进行
 
-## 结构化提交工具
+检测到新 HEAD 后，cancanneed 把上次审查的 SHA、远端和分支传给 agent。agent 自己 `git fetch`，逐个审查范围内的提交，并先读取仓库根目录下的 `review.md`（文件名忽略大小写）。首次运行、状态缺少 HEAD 或切换监控分支时，只审查当时最新的一个 commit：普通提交以第一父提交为对比起点，根提交以空树为起点。之后从已记录的 HEAD 增量审查。
 
-Agent 不直接拼装 JSON。每个问题调用一次：
+审查只上报有明确证据且真正重要的问题，例如逻辑错误、崩溃、数据损坏、并发竞态、安全问题、资源泄漏和明显的接口误用。finding 的标题应直指问题，详情简洁说明触发条件、实际后果和修复方向。代码风格和纯重构偏好不在上报范围内。
+
+提交标题或正文包含 `noreview`，或者整个提交都是第三方依赖同步、明显的自动化批量修改时，可以跳过该提交。混合提交仍需审查其中的人工修改。全部提交都可跳过时，agent 通过提交工具记录 `skip`，程序推进 HEAD，但不发送结果通知。
+
+Agent 正常退出后，cancanneed 读取它审查现场的本地 `FETCH_HEAD` 作为新进度；不会在审查结束后重新读取远端。审查失败时保留原 HEAD，下次轮询继续处理。
+
+### 提交 finding
+
+每次审查会生成一个 `submit-review.sh`。Agent 每发现一个问题就调用一次，工具负责并发安全地写入结构化 `review.json`：
 
 ```bash
 "$CANCANNEED_SUBMIT_SCRIPT" finding \
@@ -85,69 +95,55 @@ Agent 不直接拼装 JSON。每个问题调用一次：
   --line 42 \
   --severity high \
   --title "写入失败后仍推进游标" \
-  --detail "更新游标前需要确认事务已经提交。"
+  --detail "事务未提交时游标已更新，重试会漏掉该记录；应在提交成功后更新。"
 ```
 
-提交工具会先确认 `--commit` 是当前仓库中真实存在的完整 commit SHA。格式错误或对象不存在时命令以非零状态退出、把原因直接返回给 agent，且不会写入该 finding；agent 应修正 SHA 后重新提交。
+`--commit` 必须是当前仓库中真实存在的完整 commit SHA。参数错误或对象不存在时，工具返回非零退出码并告知原因，agent 应修正后重试。严重级别可取 `critical`、`high`、`medium`、`low`、`info`。多个 finding 可以并发提交；agent 等所有提交命令成功后正常退出即可。没有 finding 时不需要生成 `review.json`。
 
-如果所有 commit 都属于允许跳过的情况，调用：
+全部提交都符合跳过条件时调用：
 
 ```bash
-"$CANCANNEED_SUBMIT_SCRIPT" skip \
-  --reason "范围内所有 commit 均包含 noreview"
+"$CANCANNEED_SUBMIT_SCRIPT" skip --reason "范围内所有 commit 均包含 noreview"
 ```
 
-普通 review 不需要执行任何结束命令。等待所有 finding 命令返回后，让 agent 以退出码 0 正常退出即可。如果有 finding，工具生成如下 JSON：
+## 通知与失败重试
 
-```json
-{
-  "findings": [
-    {
-      "severity": "high",
-      "author": "Alice",
-      "commit": "0123456789abcdef0123456789abcdef01234567",
-      "file": "internal/store/store.go",
-      "line": 42,
-      "title": "写入失败后仍推进游标",
-      "detail": "更新游标前需要确认事务已经提交。"
-    }
-  ]
-}
+成功审查后，cancanneed 从本地 Git 读取相关 commit 的标题、作者、邮箱和提交时间。结果卡片标题为“Code Review结果通知”，按作者分卡，并在每位作者下面按 commit 展示 finding；同一 commit 的 finding 不会被拆开。单卡以 8 个 finding 为拆分目标，内容过多时会发送多张卡片。没有重要问题的审查也会生成结果通知；全部跳过的审查不通知。
+
+飞书发送进度保存在仓库 state 中。发送失败不会重新审查已完成的提交，也不会阻止后续审查；下次轮询会从未发送成功的卡片继续。若进程恰好在发送成功、进度落盘之前退出，重启后可能重发该卡片。
+
+Agent 执行失败会先按 `retries` 和 `retry_backoff` 在当前轮重试。整轮仍失败时，首次发送“Code Review失败通知”；同一待审查 HEAD 的后续失败只在累计第 30、60、90……次时再次通知。成功后清空失败计数；服务正常退出不计为失败。
+
+## 状态与运行文件
+
+默认目录位于配置文件所在目录下：
+
+```text
+.cancanneed/
+├── state/
+│   ├── backend.json              # HEAD、失败计数、待发通知及发送进度
+│   └── backend.json.lock         # 此仓库的进程锁
+└── runs/
+    └── backend-<sha>-<时间戳>/
+        ├── request.json          # 本次审查请求
+        ├── submit-review.sh      # finding/skip 提交工具
+        ├── agent-attempt-1.stdout.log
+        ├── agent-attempt-1.stderr.log
+        └── review.json           # 有 finding 或 skip 时才生成
 ```
 
-`skip` 只能用于所有 commit 都无需审查的情况，不能与 finding 共存，且不会发送飞书通知。其他情况下，cancanneed 根据 finding 数量自动生成 verdict 和摘要：没有 finding 为 `approve`，有 finding 为 `request_changes`。严重级别可取 `critical`、`high`、`medium`、`low`、`info`。每次运行的完整 stdout/stderr 和产物保留在 `runs_dir`。
+每个仓库各用一个状态文件和锁。同一仓库不能同时由两个实例监控；仓库集合不重叠的实例可以共用 `state_dir`。进程结束后系统会释放锁，`.lock` 文件仍可保留。要让某个仓库重新按“首次审查”处理，请先停止监控它的实例，再删除对应的 JSON 状态文件。
 
-## Dummy agent 与测试
+`max_review_runs` 会在启动检查及新审查前清理该仓库最旧的运行目录，不影响其他仓库。运行日志和结果可能包含代码及 agent 输出，应限制这些目录的访问权限。生产环境建议使用权限受限的服务账号和专用仓库副本，不要把真实密钥写入配置文件。
 
-项目包含一个不调用模型的 dummy binary，可用于端到端验证重试和结构化提交：
+## 开发与测试
+
+项目提供不调用模型的 dummy agent，可用于端到端验证重试和结构化提交：
 
 ```bash
 go build -o /tmp/cancanneed-dummy ./cmd/dummy-agent
-```
-
-在某个仓库的 agent 配置中使用：
-
-```yaml
-agent:
-  type: pi
-  command: /tmp/cancanneed-dummy
-  args: ["{prompt}"]
-  retries: 2
-  retry_backoff: 100ms
-  env:
-    DUMMY_FAIL_COUNT: "1"
-    DUMMY_COUNTER_FILE: /tmp/cancanneed-dummy-attempts
-```
-
-然后运行：
-
-```bash
 go test ./...
 go vet ./...
 ```
 
-测试覆盖配置默认值、agent 失败重试、并发 finding 提交、严格 JSON、首次最新 commit 与后续更新的完整流程、持久化状态和飞书卡片。
-
-## 运行安全
-
-coding agent 本身能执行命令，prompt 约束不是安全边界。生产环境建议给每个仓库使用专门的只读 clone，并把 cancanneed/agent 放在权限受限的容器或系统账号中；API key 通过进程环境注入，不要提交到配置文件。运行产物可能包含代码和 agent 输出，应限制 `runs_dir` 的访问权限并按需清理。
+测试时可把仓库的 `agent.command` 设为 `/tmp/cancanneed-dummy`，并通过 `agent.env` 设置 `DUMMY_FAIL_COUNT` 和 `DUMMY_COUNTER_FILE`。具体配置字段仍以 [config.example.yaml](config.example.yaml) 为准。

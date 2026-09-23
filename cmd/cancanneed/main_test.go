@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"errors"
+	"flag"
 	"log/slog"
 	"strings"
 	"testing"
@@ -10,6 +12,27 @@ import (
 	"cancanneed/internal/config"
 	"cancanneed/internal/model"
 )
+
+func TestHelpDescribesCommandsAndConfiguration(t *testing.T) {
+	for _, required := range []string{
+		"cancanneed [run] [选项]",
+		"cancanneed once [选项]",
+		"-config PATH",
+		"-debug",
+		"repositories",
+		"feishu.webhook",
+		"config.example.yaml",
+	} {
+		if !strings.Contains(usageText(), required) {
+			t.Fatalf("help does not contain %q", required)
+		}
+	}
+	for _, arguments := range [][]string{{"--help"}, {"run", "--help"}, {"once", "-h"}} {
+		if err := run(arguments); !errors.Is(err, flag.ErrHelp) {
+			t.Fatalf("run %v error = %v, want flag.ErrHelp", arguments, err)
+		}
+	}
+}
 
 func TestLogLoadedConfigIncludesUsefulFieldsWithoutSecrets(t *testing.T) {
 	var output bytes.Buffer
