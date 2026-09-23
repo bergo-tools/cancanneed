@@ -165,6 +165,8 @@ func (r Repository) run(ctx context.Context, args ...string) (string, error) {
 func (r Repository) runWithInput(ctx context.Context, input []byte, args ...string) (string, error) {
 	cmdArgs := append([]string{"-C", r.Path}, args...)
 	cmd := exec.CommandContext(ctx, "git", cmdArgs...)
+	configureProcessGroup(cmd)
+	cmd.WaitDelay = 2 * time.Second
 	var stdout, stderr bytes.Buffer
 	cmd.Stdin = bytes.NewReader(input)
 	cmd.Stdout = &stdout

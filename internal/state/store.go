@@ -22,11 +22,20 @@ type RepositoryState struct {
 	PendingNotifications        []model.PendingNotification `json:"pending_notifications,omitempty"`
 	PendingFailureNotifications []model.ReviewFailureReport `json:"pending_failure_notifications,omitempty"`
 	ReviewFailure               *ReviewFailureState         `json:"review_failure,omitempty"`
+	CheckFailure                *CheckFailureState          `json:"check_failure,omitempty"`
 }
 
 // ReviewFailureState tracks consecutive failed review cycles for one observed HEAD.
 type ReviewFailureState struct {
 	HeadSHA      string    `json:"head_sha"`
+	Count        int       `json:"count"`
+	LastError    string    `json:"last_error"`
+	LastFailedAt time.Time `json:"last_failed_at"`
+}
+
+// CheckFailureState tracks a consecutive run of repository checks that could
+// not complete, independently of failures reviewing a known HEAD.
+type CheckFailureState struct {
 	Count        int       `json:"count"`
 	LastError    string    `json:"last_error"`
 	LastFailedAt time.Time `json:"last_failed_at"`
@@ -204,6 +213,10 @@ func cloneRepositoryState(value RepositoryState) RepositoryState {
 	if value.ReviewFailure != nil {
 		failure := *value.ReviewFailure
 		value.ReviewFailure = &failure
+	}
+	if value.CheckFailure != nil {
+		failure := *value.CheckFailure
+		value.CheckFailure = &failure
 	}
 	return value
 }

@@ -26,7 +26,10 @@ type App struct {
 	processRepositoryOverride func(context.Context, config.Repository) error
 }
 
-const reviewFailureNotificationInterval = 30
+const (
+	reviewFailureNotificationInterval = 30
+	repositoryCheckTimeout            = 5 * time.Minute
+)
 
 func (a *App) Run(ctx context.Context) error {
 	var monitors sync.WaitGroup
@@ -103,6 +106,10 @@ func (a *App) runRepository(ctx context.Context, repository config.Repository) e
 }
 
 func (a *App) processRepository(ctx context.Context, repository config.Repository) error {
+	return a.processRepositoryWithCheckTimeout(ctx, repository, repositoryCheckTimeout)
+}
+
+func (a *App) processRepositoryWithCheckTimeout(ctx context.Context, repository config.Repository, checkTimeout time.Duration) error {
 	if err := a.Reviewer.Cleanup(repository.Name); err != nil {
 		return fmt.Errorf("clean old review runs: %w", err)
 	}
@@ -123,13 +130,18 @@ func (a *App) processRepository(ctx context.Context, repository config.Repositor
 	}
 
 	git := gitrepo.Repository{Path: repository.Path, Remote: repository.Remote}
+	checkCtx, cancelCheck := context.WithTimeout(ctx, checkTimeout)
+	defer cancelCheck()
 	checkFailure := func(branch, head string, checkErr error) error {
 		if ctx.Err() != nil {
 			return errors.Join(pendingDeliveryErr, ctx.Err())
 		}
+		if errors.Is(checkCtx.Err(), context.DeadlineExceeded) {
+			checkErr = fmt.Errorf("repository check timed out after %s: %w", checkTimeout, checkErr)
+		}
 		checkErr = fmt.Errorf("check repository update: %w", checkErr)
-		if failureErr := a.recordReviewFailure(ctx, repository, current, branch, current.HeadSHA, head, checkErr); failureErr != nil {
-			return errors.Join(pendingDeliveryErr, checkErr, fmt.Errorf("record review failure: %w", failureErr))
+		if failureErr := a.recordCheckFailure(ctx, repository, current, branch, current.HeadSHA, head, checkErr); failureErr != nil {
+			return errors.Join(pendingDeliveryErr, checkErr, fmt.Errorf("record repository check failure: %w", failureErr))
 		}
 		return errors.Join(pendingDeliveryErr, checkErr)
 	}
@@ -137,15 +149,15 @@ func (a *App) processRepository(ctx context.Context, repository config.Repositor
 	if branch == "" {
 		branch = current.Branch
 	}
-	if err := git.Validate(ctx); err != nil {
+	if err := git.Validate(checkCtx); err != nil {
 		return checkFailure(branch, "", err)
 	}
-	resolvedBranch, err := git.ResolveBranch(ctx, repository.Branch)
+	resolvedBranch, err := git.ResolveBranch(checkCtx, repository.Branch)
 	if err != nil {
 		return checkFailure(branch, "", err)
 	}
 	branch = resolvedBranch
-	head, err := git.RemoteHead(ctx, branch)
+	head, err := git.RemoteHead(checkCtx, branch)
 	if err != nil {
 		return checkFailure(branch, "", err)
 	}
@@ -153,11 +165,11 @@ func (a *App) processRepository(ctx context.Context, repository config.Repositor
 	latestOnly := !exists || current.HeadSHA == "" || current.Branch != branch
 	reviewFrom := current.HeadSHA
 	if latestOnly {
-		if err := git.PinRemoteHead(ctx, branch, head); err != nil {
+		if err := git.PinRemoteHead(checkCtx, branch, head); err != nil {
 			return checkFailure(branch, head, err)
 		}
 		var err error
-		reviewFrom, err = git.ReviewBase(ctx, head)
+		reviewFrom, err = git.ReviewBase(checkCtx, head)
 		if err != nil {
 			return checkFailure(branch, head, err)
 		}
@@ -165,11 +177,22 @@ func (a *App) processRepository(ctx context.Context, repository config.Repositor
 			current = state.RepositoryState{
 				Branch:                      branch,
 				ReviewFailure:               current.ReviewFailure,
+				CheckFailure:                current.CheckFailure,
 				PendingNotifications:        current.PendingNotifications,
 				PendingFailureNotifications: current.PendingFailureNotifications,
 			}
 		} else {
 			current.Branch = branch
+		}
+	}
+	if err := checkCtx.Err(); err != nil {
+		return checkFailure(branch, head, err)
+	}
+	cancelCheck()
+	if current.CheckFailure != nil {
+		current.CheckFailure = nil
+		if err := a.State.Put(repository.Name, current); err != nil {
+			return errors.Join(pendingDeliveryErr, fmt.Errorf("clear recovered repository check failure: %w", err))
 		}
 	}
 	if !latestOnly && current.HeadSHA == head {
@@ -230,6 +253,48 @@ func (a *App) processRepository(ctx context.Context, repository config.Repositor
 		return pendingDeliveryErr
 	}
 	return a.deliverPending(ctx, repository.Name, current)
+}
+
+func (a *App) recordCheckFailure(
+	ctx context.Context,
+	repository config.Repository,
+	current state.RepositoryState,
+	branch string,
+	fromSHA string,
+	head string,
+	checkErr error,
+) error {
+	failure := state.CheckFailureState{}
+	if current.CheckFailure != nil {
+		failure = *current.CheckFailure
+	}
+	failure.Count++
+	failure.LastError = truncateText(checkErr.Error(), 4000)
+	failure.LastFailedAt = a.now().UTC()
+
+	notificationDue := failure.Count == 1 || failure.Count%reviewFailureNotificationInterval == 0
+	if notificationDue {
+		current.PendingFailureNotifications = append(current.PendingFailureNotifications, model.ReviewFailureReport{
+			Repository:   repository.Name,
+			Branch:       branch,
+			FromSHA:      fromSHA,
+			HeadSHA:      head,
+			Agent:        repository.Agent.Type,
+			Error:        failure.LastError,
+			FailureCount: failure.Count,
+			RetryCount:   failure.Count - 1,
+			RetryAfter:   a.Config.PollInterval.Value().String(),
+			GeneratedAt:  failure.LastFailedAt,
+		})
+	}
+	current.CheckFailure = &failure
+	if err := a.State.Put(repository.Name, current); err != nil {
+		return fmt.Errorf("save failed repository check state: %w", err)
+	}
+	if notificationDue {
+		return a.deliverPendingReviewFailure(ctx, repository.Name, current)
+	}
+	return nil
 }
 
 func (a *App) deliverPending(ctx context.Context, name string, current state.RepositoryState) error {

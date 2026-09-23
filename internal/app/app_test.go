@@ -474,7 +474,7 @@ func TestInitialRemoteProbeFailureNotifiesWithoutHead(t *testing.T) {
 		t.Fatal("missing remote did not fail the repository check")
 	}
 	current, exists := store.Get("api")
-	if !exists || current.HeadSHA != "" || current.ReviewFailure == nil || current.ReviewFailure.Count != 1 || len(notifier.failures) != 1 {
+	if !exists || current.HeadSHA != "" || current.CheckFailure == nil || current.CheckFailure.Count != 1 || current.ReviewFailure != nil || len(notifier.failures) != 1 {
 		t.Fatalf("initial remote failure state = %#v, notifications = %#v", current, notifier.failures)
 	}
 }
@@ -517,7 +517,7 @@ func TestRemoteHeadFailureNotifiesOnceAndClearsAfterRecovery(t *testing.T) {
 			t.Fatalf("remote failure attempt %d returned nil", attempt)
 		}
 		current, _ := store.Get("api")
-		if current.HeadSHA != head || current.ReviewFailure == nil || current.ReviewFailure.Count != attempt || current.ReviewFailure.HeadSHA != "" {
+		if current.HeadSHA != head || current.CheckFailure == nil || current.CheckFailure.Count != attempt || current.ReviewFailure != nil {
 			t.Fatalf("remote failure state after attempt %d = %#v", attempt, current)
 		}
 		if len(notifier.failures) != 1 || notifier.failures[0].HeadSHA != "" || !strings.Contains(notifier.failures[0].Error, "read origin/main") {
@@ -529,8 +529,82 @@ func TestRemoteHeadFailureNotifiesOnceAndClearsAfterRecovery(t *testing.T) {
 		t.Fatalf("recovered remote check: %v", err)
 	}
 	current, _ := store.Get("api")
-	if current.HeadSHA != head || current.ReviewFailure != nil || len(notifier.failures) != 1 {
+	if current.HeadSHA != head || current.CheckFailure != nil || current.ReviewFailure != nil || len(notifier.failures) != 1 {
 		t.Fatalf("recovered state = %#v, notifications = %#v", current, notifier.failures)
+	}
+}
+
+func TestRepositoryCheckFailuresDoNotResetKnownHeadReviewFailures(t *testing.T) {
+	store, err := state.Open(filepath.Join(t.TempDir(), "state"), "api")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	notifier := &recordingNotifier{}
+	service := &App{
+		Config:   config.Config{PollInterval: config.Duration(time.Minute)},
+		State:    store,
+		Notifier: notifier,
+		Now:      func() time.Time { return time.Unix(1700000000, 0) },
+	}
+	repository := config.Repository{Name: "api", Agent: config.Agent{Type: "pi"}}
+	for i := 0; i < 30; i++ {
+		current, _ := store.Get("api")
+		if err := service.recordReviewFailure(context.Background(), repository, current, "main", "old", "new", errors.New("agent failed")); err != nil {
+			t.Fatal(err)
+		}
+		current, _ = store.Get("api")
+		if err := service.recordCheckFailure(context.Background(), repository, current, "main", "old", "", errors.New("remote unavailable")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	current, _ := store.Get("api")
+	if current.ReviewFailure == nil || current.ReviewFailure.HeadSHA != "new" || current.ReviewFailure.Count != 30 {
+		t.Fatalf("review failure state = %#v", current.ReviewFailure)
+	}
+	if current.CheckFailure == nil || current.CheckFailure.Count != 30 {
+		t.Fatalf("repository check failure state = %#v", current.CheckFailure)
+	}
+	if len(notifier.failures) != 4 || notifier.failures[0].FailureCount != 1 || notifier.failures[1].FailureCount != 1 || notifier.failures[2].FailureCount != 30 || notifier.failures[3].FailureCount != 30 {
+		t.Fatalf("alternating failures did not keep separate notification counts: %#v", notifier.failures)
+	}
+}
+
+func TestRepositoryCheckTimeoutRecordsFailure(t *testing.T) {
+	if repositoryCheckTimeout != 5*time.Minute {
+		t.Fatalf("repository check timeout = %s, want 5m", repositoryCheckTimeout)
+	}
+	dir := t.TempDir()
+	repositoryPath := filepath.Join(dir, "repository")
+	runGit(t, dir, "init", repositoryPath)
+	runGit(t, repositoryPath, "remote", "add", "origin", "ssh://example.invalid/repository.git")
+	sshPath := filepath.Join(dir, "blocking-ssh")
+	if err := os.WriteFile(sshPath, []byte("#!/bin/sh\nexec sleep 30\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GIT_SSH_COMMAND", sshPath)
+	store, err := state.Open(filepath.Join(dir, "state"), "api")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	notifier := &recordingNotifier{}
+	service := &App{
+		Config: config.Config{PollInterval: config.Duration(time.Minute)},
+		State:  store, Reviewer: review.Reviewer{RunsDir: filepath.Join(dir, "runs")}, Notifier: notifier,
+	}
+	repository := config.Repository{Name: "api", Path: repositoryPath, Remote: "origin", Branch: "main", Agent: config.Agent{Type: "pi"}}
+	started := time.Now()
+	err = service.processRepositoryWithCheckTimeout(context.Background(), repository, 50*time.Millisecond)
+	if err == nil || !strings.Contains(err.Error(), "timed out after 50ms") {
+		t.Fatalf("repository check timeout error = %v", err)
+	}
+	if elapsed := time.Since(started); elapsed > 3*time.Second {
+		t.Fatalf("repository check took %s after its timeout", elapsed)
+	}
+	current, _ := store.Get("api")
+	if current.CheckFailure == nil || current.CheckFailure.Count != 1 || len(notifier.failures) != 1 {
+		t.Fatalf("timed-out repository check state = %#v, notifications = %#v", current, notifier.failures)
 	}
 }
 
