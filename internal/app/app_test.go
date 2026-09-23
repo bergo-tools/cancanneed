@@ -108,7 +108,7 @@ func TestRunOnceReviewsLatestCommitWithoutBaseline(t *testing.T) {
 				Type:         "pi",
 				Command:      os.Args[0],
 				Args:         []string{"-test.run=TestRunOnceReviewsLatestCommitWithoutBaseline", "--", "{prompt}"},
-				Env:          map[string]string{"GO_WANT_APP_DUMMY": "1"},
+				Env:          map[string]string{"GO_WANT_APP_DUMMY": "1", "DUMMY_VERDICT": "finding"},
 				Timeout:      config.Duration(10 * time.Second),
 				Retries:      &retries,
 				RetryBackoff: config.Duration(time.Millisecond),
@@ -238,6 +238,20 @@ func TestRunOnceReviewsLatestCommitWithoutBaseline(t *testing.T) {
 		t.Fatalf("queued notifications were not drained: %#v", queued.PendingNotifications)
 	}
 
+	service.Config.Repositories[0].Agent.Env["DUMMY_VERDICT"] = "approve"
+	writeFile(t, filepath.Join(seed, "message.txt"), "clean review\n")
+	runGit(t, seed, "add", "message.txt")
+	runGit(t, seed, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "clean review")
+	runGit(t, seed, "push", "origin", "main")
+	cleanHead := strings.TrimSpace(runGit(t, seed, "rev-parse", "HEAD"))
+	if err := service.RunOnce(ctx); err != nil {
+		t.Fatalf("clean review: %v", err)
+	}
+	cleanState, _ := store.Get("demo")
+	if cleanState.HeadSHA != cleanHead || len(cleanState.PendingNotifications) != 0 || notifier.calls != 7 {
+		t.Fatalf("clean review state = %#v, notification calls = %d", cleanState, notifier.calls)
+	}
+
 	service.Config.Repositories[0].Agent.Env["DUMMY_VERDICT"] = "skip"
 	writeFile(t, filepath.Join(seed, "message.txt"), "initial\nupdated\nskipped\n")
 	runGit(t, seed, "add", "message.txt")
@@ -295,11 +309,11 @@ func TestRunOnceReviewsLatestCommitWithoutBaseline(t *testing.T) {
 	}
 
 	matches, err := filepath.Glob(filepath.Join(cfg.RunsDir, "*", "review.json"))
-	if err != nil || len(matches) != 1 {
+	if err != nil || len(matches) != 5 {
 		t.Fatalf("review artifacts = %v, err = %v", matches, err)
 	}
 	runDirs, err := filepath.Glob(filepath.Join(cfg.RunsDir, "*"))
-	if err != nil || len(runDirs) != 6 {
+	if err != nil || len(runDirs) != 7 {
 		t.Fatalf("run directories = %v, err = %v", runDirs, err)
 	}
 	for _, runDir := range runDirs {
@@ -334,6 +348,30 @@ func (*failOnceNotifier) NotifyReviewFailure(context.Context, model.ReviewFailur
 	return nil
 }
 
+func TestDeliverPendingDropsEmptyReports(t *testing.T) {
+	store, err := state.Open(filepath.Join(t.TempDir(), "state"), "api")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	initial := state.RepositoryState{PendingNotifications: []model.PendingNotification{
+		{ID: "api:clean", Report: model.Report{Verdict: "approve"}},
+		{ID: "api:finding", Report: model.Report{Verdict: "request_changes", Findings: []model.Finding{{Title: "bug"}}}},
+	}}
+	if err := store.Put("api", initial); err != nil {
+		t.Fatal(err)
+	}
+	notifier := &failOnceNotifier{}
+	service := &App{State: store, Notifier: notifier}
+	if err := service.deliverPending(context.Background(), "api", initial); err != nil {
+		t.Fatal(err)
+	}
+	current, _ := store.Get("api")
+	if len(current.PendingNotifications) != 0 || notifier.calls != 1 {
+		t.Fatalf("pending notifications = %#v, notify calls = %d", current.PendingNotifications, notifier.calls)
+	}
+}
+
 func TestDeliverPendingResumesFromFirstUnsentCard(t *testing.T) {
 	store, err := state.Open(filepath.Join(t.TempDir(), "state"), "api")
 	if err != nil {
@@ -345,7 +383,7 @@ func TestDeliverPendingResumesFromFirstUnsentCard(t *testing.T) {
 		Branch:  "main",
 		PendingNotifications: []model.PendingNotification{{
 			ID:     "api:new-head",
-			Report: model.Report{Repository: "api"},
+			Report: model.Report{Repository: "api", Findings: []model.Finding{{Title: "bug"}}},
 		}},
 	}
 	if err := store.Put("api", want); err != nil {
@@ -554,7 +592,19 @@ func appDummyAgent() {
 		time.Sleep(30 * time.Second)
 	}
 	verdict := os.Getenv("DUMMY_VERDICT")
-	if verdict == "skip" {
+	if verdict == "finding" {
+		commit, err := exec.Command("git", "rev-parse", "FETCH_HEAD^{commit}").Output()
+		if err != nil {
+			os.Exit(23)
+		}
+		submit := exec.Command(os.Getenv("CANCANNEED_SUBMIT_SCRIPT"),
+			"finding", "--author", "Test", "--commit", strings.TrimSpace(string(commit)),
+			"--file", "message.txt", "--line", "1", "--severity", "high",
+			"--title", "test finding", "--detail", "test detail")
+		if err := submit.Run(); err != nil {
+			os.Exit(24)
+		}
+	} else if verdict == "skip" {
 		submit := exec.Command(os.Getenv("CANCANNEED_SUBMIT_SCRIPT"), "skip", "--reason", "all commits opted out")
 		if err := submit.Run(); err != nil {
 			os.Exit(22)

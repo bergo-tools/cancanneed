@@ -184,20 +184,21 @@ func (a *App) processRepository(ctx context.Context, repository config.Repositor
 		return errors.Join(pendingDeliveryErr, reviewErr)
 	}
 	current.ReviewFailure = nil
-	if report.Verdict == "skip" {
-		current.HeadSHA = report.ToSHA
-		current.Branch = branch
-		current.UpdatedAt = a.now().UTC()
-		if err := a.State.Put(repository.Name, current); err != nil {
-			return errors.Join(pendingDeliveryErr, fmt.Errorf("save skipped review state: %w", err))
-		}
-		a.logger().Info("repository update skipped", "repository", repository.Name, "head", report.ToSHA, "reason", report.Summary)
-		return pendingDeliveryErr
-	}
-	pending := model.PendingNotification{ID: repository.Name + ":" + report.ToSHA, Report: report}
 	current.HeadSHA = report.ToSHA
 	current.Branch = branch
 	current.UpdatedAt = a.now().UTC()
+	if report.Verdict == "skip" || len(report.Findings) == 0 {
+		if err := a.State.Put(repository.Name, current); err != nil {
+			return errors.Join(pendingDeliveryErr, fmt.Errorf("save review state: %w", err))
+		}
+		if report.Verdict == "skip" {
+			a.logger().Info("repository update skipped", "repository", repository.Name, "head", report.ToSHA, "reason", report.Summary)
+		} else {
+			a.logger().Info("review completed without findings", "repository", repository.Name, "head", report.ToSHA, "run_directory", runDir)
+		}
+		return pendingDeliveryErr
+	}
+	pending := model.PendingNotification{ID: repository.Name + ":" + report.ToSHA, Report: report}
 	current.PendingNotifications = append(current.PendingNotifications, pending)
 	if err := a.State.Put(repository.Name, current); err != nil {
 		return errors.Join(pendingDeliveryErr, fmt.Errorf("save review state: %w", err))
@@ -212,6 +213,14 @@ func (a *App) processRepository(ctx context.Context, repository config.Repositor
 func (a *App) deliverPending(ctx context.Context, name string, current state.RepositoryState) error {
 	for len(current.PendingNotifications) != 0 {
 		pending := &current.PendingNotifications[0]
+		if len(pending.Report.Findings) == 0 {
+			id := pending.ID
+			current.PendingNotifications = current.PendingNotifications[1:]
+			if err := a.State.Put(name, current); err != nil {
+				return fmt.Errorf("discard empty notification %s: %w", id, err)
+			}
+			continue
+		}
 		total := a.Notifier.NotificationCount(pending.Report)
 		if pending.NextCard < 0 || pending.NextCard > total {
 			return fmt.Errorf("pending notification %s has invalid next card %d of %d", pending.ID, pending.NextCard, total)

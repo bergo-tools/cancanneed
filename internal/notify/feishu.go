@@ -111,7 +111,7 @@ func signature(timestamp, secret string) string {
 
 func buildCards(report model.Report, mentions map[string]model.AuthorMention) []map[string]any {
 	if len(report.Findings) == 0 {
-		return []map[string]any{buildSummaryCard(report)}
+		return nil
 	}
 
 	commitInfo := make(map[string]model.CommitInfo, len(report.Commits))
@@ -186,29 +186,6 @@ func findingCount(commits []commitFindings) int {
 		total += len(commit.findings)
 	}
 	return total
-}
-
-func buildSummaryCard(report model.Report) map[string]any {
-	template := "green"
-	switch report.Verdict {
-	case "request_changes":
-		template = "red"
-	case "comment":
-		template = "orange"
-	}
-	title := "Code Review结果通知"
-	elements := []any{
-		map[string]any{
-			"tag": "div",
-			"text": map[string]any{
-				"tag": "lark_md",
-				"content": fmt.Sprintf("**仓库：** %s\n**分支：** %s\n**变更：** `%s` → `%s`\n**Agent：** %s\n\n%s",
-					escapeMarkdown(report.Repository), escapeMarkdown(report.Branch), short(report.FromSHA), short(report.ToSHA), escapeMarkdown(report.Agent), escapeMarkdown(truncate(report.Summary, 2000))),
-			},
-		},
-	}
-	elements = append(elements, markdownElement("未发现需要报告的问题。"))
-	return cardEnvelope(template, title, elements)
 }
 
 func buildAuthorCard(report model.Report, author string, mention model.AuthorMention, commits []commitFindings, authorTotal, part, parts int) map[string]any {

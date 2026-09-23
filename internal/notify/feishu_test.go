@@ -46,12 +46,25 @@ func TestFeishuSendsInteractiveCard(t *testing.T) {
 	}
 }
 
+func TestFeishuOmitsCardWithoutFindings(t *testing.T) {
+	report := model.Report{Verdict: "approve"}
+	feishu := Feishu{}
+	if count := feishu.NotificationCount(report); count != 0 {
+		t.Fatalf("card count = %d, want 0", count)
+	}
+	if err := feishu.Notify(context.Background(), report, 0); err == nil {
+		t.Fatal("empty review should not have a sendable card")
+	}
+}
+
 func TestFeishuRejectsApplicationError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`{"code":19001,"msg":"bad webhook"}`))
 	}))
 	defer server.Close()
-	if err := (Feishu{Webhook: server.URL, Client: server.Client()}).Notify(context.Background(), model.Report{}, 0); err == nil {
+	if err := (Feishu{Webhook: server.URL, Client: server.Client()}).Notify(context.Background(), model.Report{
+		Findings: []model.Finding{{Author: "Alice", Commit: "1111111111111111111111111111111111111111"}},
+	}, 0); err == nil {
 		t.Fatal("expected an error")
 	}
 }

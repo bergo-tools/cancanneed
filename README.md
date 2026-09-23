@@ -108,7 +108,7 @@ Agent 正常退出后，cancanneed 读取它审查现场的本地 `FETCH_HEAD` �
 
 ## 通知与失败重试
 
-成功审查后，cancanneed 从本地 Git 读取相关 commit 的标题、作者、邮箱和提交时间。结果卡片标题为“Code Review结果通知”，按作者分卡，并在每位作者下面按 commit 展示 finding；同一 commit 的 finding 不会被拆开。单卡以 8 个 finding 为拆分目标，内容过多时会发送多张卡片。没有重要问题的审查也会生成结果通知；全部跳过的审查不通知。
+发现重要问题后，cancanneed 从本地 Git 读取相关 commit 的标题、作者、邮箱和提交时间。结果卡片标题为“Code Review结果通知”，按作者分卡，并在每位作者下面按 commit 展示 finding；同一 commit 的 finding 不会被拆开。单卡以 8 个 finding 为拆分目标，内容过多时会发送多张卡片。没有 finding 或全部跳过时只推进 HEAD，不发送结果通知。
 
 飞书发送进度保存在仓库 state 中。发送失败不会重新审查已完成的提交，也不会阻止后续审查；下次轮询会从未发送成功的卡片继续。若进程恰好在发送成功、进度落盘之前退出，重启后可能重发该卡片。
 

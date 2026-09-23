@@ -81,16 +81,19 @@ func Run(arguments []string) error {
 }
 
 func validateCommit(repository, commit string) error {
-	command := exec.Command("git", "-C", repository, "cat-file", "-e", commit+"^{commit}")
+	command := exec.Command("git", "-C", repository, "cat-file", "-t", commit)
 	output, err := command.CombinedOutput()
-	if err == nil {
-		return nil
+	if err != nil {
+		detail := strings.TrimSpace(string(output))
+		if detail == "" {
+			detail = err.Error()
+		}
+		return fmt.Errorf("--commit %s does not identify an existing commit in repository: %s", commit, detail)
 	}
-	detail := strings.TrimSpace(string(output))
-	if detail == "" {
-		detail = err.Error()
+	if objectType := strings.TrimSpace(string(output)); objectType != "commit" {
+		return fmt.Errorf("--commit %s identifies a %s object, not a commit; use the commit SHA instead", commit, objectType)
 	}
-	return fmt.Errorf("--commit %s does not identify an existing commit in repository: %s", commit, detail)
+	return nil
 }
 
 func parseFinding(arguments []string) (model.Finding, error) {

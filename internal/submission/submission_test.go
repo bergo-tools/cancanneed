@@ -93,6 +93,31 @@ func TestFindingRejectsCommitMissingFromRepository(t *testing.T) {
 	}
 }
 
+func TestFindingRejectsAnnotatedTagObject(t *testing.T) {
+	repository, _ := createTestRepository(t)
+	runTestGit(t, repository, "-c", "user.name=Test", "-c", "user.email=test@example.com", "tag", "-a", "review-tag", "-m", "test tag")
+	tagSHA := strings.TrimSpace(runTestGit(t, repository, "rev-parse", "refs/tags/review-tag"))
+	output := filepath.Join(t.TempDir(), "review.json")
+	err := Run([]string{
+		"--output", output,
+		"--repository", repository,
+		"finding",
+		"--author", "Alice",
+		"--commit", tagSHA,
+		"--file", "main.go",
+		"--line", "1",
+		"--severity", "high",
+		"--title", "title",
+		"--detail", "detail",
+	})
+	if err == nil || !strings.Contains(err.Error(), "tag object, not a commit") {
+		t.Fatalf("error = %v, want annotated tag rejection", err)
+	}
+	if _, err := os.Stat(output); !os.IsNotExist(err) {
+		t.Fatalf("tag finding created output: %v", err)
+	}
+}
+
 func TestFindingRequiresCommitMetadata(t *testing.T) {
 	err := Run([]string{
 		"--output", filepath.Join(t.TempDir(), "review.json"),
