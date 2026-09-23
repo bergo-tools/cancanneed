@@ -21,9 +21,14 @@ import (
 )
 
 func main() {
-	if err := run(os.Args[1:]); errors.Is(err, flag.ErrHelp) {
+	arguments := os.Args[1:]
+	if err := run(arguments); errors.Is(err, flag.ErrHelp) {
 		return
 	} else if err != nil {
+		if len(arguments) > 0 && arguments[0] == "__submit" {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
 		slog.Error("cancanneed stopped", "error", err)
 		os.Exit(1)
 	}

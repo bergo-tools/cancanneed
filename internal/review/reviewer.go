@@ -249,7 +249,17 @@ func submitScript(outputPath, repositoryPath string, command []string) string {
 	}
 	return fmt.Sprintf(`#!/bin/sh
 set -eu
-exec %s --output %s --repository %s "$@"
+if feedback=$(%s --output %s --repository %s "$@" 2>&1); then
+  printf '提交成功：%%s 已记录。\n' "$1"
+else
+  status=$?
+  if [ -n "$feedback" ]; then
+    printf '提交失败：%%s\n' "$feedback" >&2
+  else
+    printf '提交失败：工具返回退出码 %%s，但未提供原因。\n' "$status" >&2
+  fi
+  exit "$status"
+fi
 `, strings.Join(quotedCommand, " "), shellQuote(outputPath), shellQuote(repositoryPath))
 }
 
@@ -292,7 +302,7 @@ func buildPrompt(request Request, submitPath string) string {
 3. 如果 git fetch 因网络、认证、权限等原因失败，立即调用 %s fetch-failed --reason "<简洁的 Git 错误>"；确认命令成功后停止审查并正常退出。不要沿用旧的 FETCH_HEAD，也不要继续提交 finding。cancanneed 会把本轮记为审查失败。
 4. 每发现一个符合上述上报标准的问题，调用一次下面的工具；多个问题可以并发提交：
    %s finding --author "<git show -s --format=%%an 得到的提交作者名称>" --commit "<完整提交 SHA>" --file "<仓库相对文件路径>" --line <新文件中的行号> --severity "<critical|high|medium>" --title "<问题标题>" --detail "<问题原因和修复建议>"
-5. 每次调用提交工具都必须检查退出码。如果工具报告参数错误或 commit 不存在, 确认完整 SHA、修正参数后再次调用；只有退出码为 0 才表示该 finding 提交成功。
+5. 每次调用提交工具后阅读它的反馈：只有看到“提交成功”才表示结果已记录，不要重复提交；看到“提交失败”时按具体原因修正参数或完整 commit SHA 后重新调用。
 6. 等待所有 finding 命令成功执行完成后直接正常退出。没有 finding 时也直接正常退出。
 `, introduction, coverage, shellCommand(submitPath), shellCommand(submitPath), shellCommand(submitPath))
 }

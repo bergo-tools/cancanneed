@@ -98,7 +98,7 @@ Agent 成功完成审查后，cancanneed 读取它审查现场的本地 `FETCH_H
   --detail "事务未提交时游标已更新，重试会漏掉该记录；应在提交成功后更新。"
 ```
 
-`--commit` 必须是当前仓库中真实存在的完整 commit SHA。参数错误或对象不存在时，工具返回非零退出码并告知原因，agent 应修正后重试。严重级别可取 `critical`、`high`、`medium`、`low`、`info`。多个 finding 可以并发提交；agent 等所有提交命令成功后正常退出即可。没有 finding 时不需要生成 `review.json`。
+`--commit` 必须是当前仓库中真实存在的完整 commit SHA。提交工具会直接输出“提交成功”或“提交失败：具体原因”，失败时仍返回非零退出码；agent 应按反馈修正后重试。严重级别可取 `critical`、`high`、`medium`、`low`、`info`。多个 finding 可以并发提交；agent 等所有提交命令成功后正常退出即可。没有 finding 时不需要生成 `review.json`。
 
 全部提交都符合跳过条件时调用：
 

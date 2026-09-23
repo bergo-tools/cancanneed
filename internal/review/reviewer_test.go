@@ -1,8 +1,10 @@
 package review
 
 import (
+	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -27,7 +29,8 @@ func TestBuildPromptUsesChineseInstructions(t *testing.T) {
 		"标题直指具体问题；详情只说明触发条件、实际后果和必要的修复方向",
 		"skip --reason",
 		"fetch-failed --reason",
-		"每次调用提交工具都必须检查退出码",
+		"只有看到“提交成功”才表示结果已记录",
+		"看到“提交失败”时按具体原因修正",
 		"等待所有 finding 命令成功执行完成后直接正常退出",
 	} {
 		if !strings.Contains(prompt, required) {
@@ -40,12 +43,42 @@ func TestBuildPromptUsesChineseInstructions(t *testing.T) {
 	if strings.Contains(strings.ToLower(prompt), "complete") {
 		t.Fatalf("prompt must not mention the removed complete command:\n%s", prompt)
 	}
+	if strings.Contains(prompt, "检查退出码") {
+		t.Fatalf("prompt should rely on explicit submission feedback:\n%s", prompt)
+	}
 }
 
 func TestSubmitScriptPassesRepositoryForCommitValidation(t *testing.T) {
 	script := submitScript("/tmp/review.json", "/repo with spaces", []string{"/bin/cancanneed", "__submit"})
 	if !strings.Contains(script, "--repository '/repo with spaces'") {
 		t.Fatalf("submit script does not pass repository: %s", script)
+	}
+}
+
+func TestSubmitScriptReportsSuccessAndFailureReason(t *testing.T) {
+	dir := t.TempDir()
+	scriptPath := filepath.Join(dir, "submit-review.sh")
+	helper := `if [ "$4" = finding ]; then exit 0; fi
+if [ "$4" = silent ]; then exit 8; fi
+printf 'commit does not exist\n' >&2
+exit 7`
+	script := submitScript(filepath.Join(dir, "review.json"), dir, []string{"/bin/sh", "-c", helper})
+	if err := os.WriteFile(scriptPath, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	success, err := exec.Command(scriptPath, "finding").CombinedOutput()
+	if err != nil || string(success) != "提交成功：finding 已记录。\n" {
+		t.Fatalf("successful submission output = %q, error = %v", success, err)
+	}
+	failed, err := exec.Command(scriptPath, "skip").CombinedOutput()
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 7 || string(failed) != "提交失败：commit does not exist\n" {
+		t.Fatalf("failed submission output = %q, error = %v", failed, err)
+	}
+	silent, err := exec.Command(scriptPath, "silent").CombinedOutput()
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 8 || !strings.Contains(string(silent), "提交失败：工具返回退出码 8，但未提供原因。") {
+		t.Fatalf("silent failure output = %q, error = %v", silent, err)
 	}
 }
 
