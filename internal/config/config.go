@@ -18,7 +18,7 @@ import (
 
 const (
 	defaultPollInterval = 5 * time.Minute
-	defaultAgentTimeout = time.Hour
+	defaultAgentTimeout = 2 * time.Hour
 	defaultRetryBackoff = 15 * time.Second
 )
 
@@ -167,7 +167,7 @@ func (c *Config) applyDefaults(baseDir string) {
 			repo.Agent.RetryBackoff = Duration(defaultRetryBackoff)
 		}
 		if repo.Agent.Retries == nil {
-			retries := 2
+			retries := 1
 			repo.Agent.Retries = &retries
 		}
 		for key, value := range repo.Agent.Env {

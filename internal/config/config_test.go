@@ -50,10 +50,10 @@ repositories:
 	if cfg.Repositories[0].Agent.RecordSession {
 		t.Fatal("record_session should default to false")
 	}
-	if cfg.Repositories[0].Agent.Timeout.Value() != time.Hour {
+	if cfg.Repositories[0].Agent.Timeout.Value() != 2*time.Hour {
 		t.Fatalf("timeout = %s", cfg.Repositories[0].Agent.Timeout.Value())
 	}
-	if cfg.Repositories[0].Agent.RetryCount() != 2 {
+	if cfg.Repositories[0].Agent.RetryCount() != 1 {
 		t.Fatalf("retries = %d", cfg.Repositories[0].Agent.RetryCount())
 	}
 	if cfg.Repositories[0].Agent.Env["TOKEN"] != "secret-value" {
