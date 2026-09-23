@@ -144,6 +144,12 @@ func TestFeishuBuildsFailureNotification(t *testing.T) {
 			t.Fatalf("failure card does not contain %q: %s", want, content)
 		}
 	}
+	unknownHead := cardText(t, buildFailureCard(model.ReviewFailureReport{Repository: "api", Error: "read origin/main: permission denied"}))
+	for _, want := range []string{"未获取", "未确定", "无记录", "permission denied"} {
+		if !strings.Contains(unknownHead, want) {
+			t.Fatalf("unknown-head failure card does not contain %q: %s", want, unknownHead)
+		}
+	}
 }
 
 func cardText(t *testing.T, card map[string]any) string {

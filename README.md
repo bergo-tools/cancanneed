@@ -81,7 +81,7 @@ Agent 子进程继承 cancanneed 的环境变量，还可通过 `agent.env` 覆�
 
 提交标题或正文包含 `noreview`，或者整个提交都是第三方依赖同步、明显的自动化批量修改时，可以跳过该提交。混合提交仍需审查其中的人工修改。全部提交都可跳过时，agent 通过提交工具记录 `skip`，程序推进 HEAD，但不发送结果通知。
 
-Agent 正常退出后，cancanneed 读取它审查现场的本地 `FETCH_HEAD` 作为新进度；不会在审查结束后重新读取远端。审查失败时保留原 HEAD，下次轮询继续处理。
+Agent 成功完成审查后，cancanneed 读取它审查现场的本地 `FETCH_HEAD` 作为新进度；不会在审查结束后重新读取远端。审查失败时保留原 HEAD，下次轮询继续处理。
 
 ### 提交 finding
 
@@ -106,13 +106,21 @@ Agent 正常退出后，cancanneed 读取它审查现场的本地 `FETCH_HEAD` �
 "$CANCANNEED_SUBMIT_SCRIPT" skip --reason "范围内所有 commit 均包含 noreview"
 ```
 
+如果 agent 无法 `git fetch`（例如网络或远端权限错误），应立即报告并结束本轮审查：
+
+```bash
+"$CANCANNEED_SUBMIT_SCRIPT" fetch-failed --reason "git fetch origin main: permission denied"
+```
+
+该指令会废弃本轮已提交的部分 finding；cancanneed 将本轮视为失败，保留原 HEAD，并在下次轮询重试。提交工具成功写入失败标记后，agent 直接退出即可。检测远端更新时遇到 Git 错误也会按审查失败记录。
+
 ## 通知与失败重试
 
 发现重要问题后，cancanneed 从本地 Git 读取相关 commit 的标题、作者、邮箱和提交时间。结果卡片标题为“Code Review结果通知”，按作者分卡，并在每位作者下面按 commit 展示 finding；同一 commit 的 finding 不会被拆开。单卡以 8 个 finding 为拆分目标，内容过多时会发送多张卡片。没有 finding 或全部跳过时只推进 HEAD，不发送结果通知。
 
 飞书发送进度保存在仓库 state 中。发送失败不会重新审查已完成的提交，也不会阻止后续审查；下次轮询会从未发送成功的卡片继续。若进程恰好在发送成功、进度落盘之前退出，重启后可能重发该卡片。
 
-Agent 执行失败会先按 `retries` 和 `retry_backoff` 在当前轮重试。整轮仍失败时，首次发送“Code Review失败通知”；同一待审查 HEAD 的后续失败只在累计第 30、60、90……次时再次通知。成功后清空失败计数；服务正常退出不计为失败。
+Agent 执行失败会先按 `retries` 和 `retry_backoff` 在当前轮重试。整轮仍失败时，首次发送“Code Review失败通知”；同一待审查 HEAD 的后续失败只在累计第 30、60、90……次时再次通知。远端尚无法提供 HEAD 时也按连续失败计数，并在卡片中标为“未获取”。连接恢复或审查成功后清空失败计数；服务正常退出不计为失败。
 
 ## 状态与运行文件
 
@@ -126,10 +134,10 @@ Agent 执行失败会先按 `retries` 和 `retry_backoff` 在当前轮重试。�
 └── runs/
     └── backend-<sha>-<时间戳>/
         ├── request.json          # 本次审查请求
-        ├── submit-review.sh      # finding/skip 提交工具
+        ├── submit-review.sh      # finding/skip/fetch-failed 提交工具
         ├── agent-attempt-1.stdout.log
         ├── agent-attempt-1.stderr.log
-        └── review.json           # 有 finding 或 skip 时才生成
+        └── review.json           # 有 finding、skip 或 fetch-failed 时生成
 ```
 
 每个仓库各用一个状态文件和锁。同一仓库不能同时由两个实例监控；仓库集合不重叠的实例可以共用 `state_dir`。进程结束后系统会释放锁，`.lock` 文件仍可保留。要让某个仓库重新按“首次审查”处理，请先停止监控它的实例，再删除对应的 JSON 状态文件。

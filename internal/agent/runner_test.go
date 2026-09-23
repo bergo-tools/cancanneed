@@ -69,6 +69,42 @@ func TestMissingResultMeansSuccessfulReviewWithNoFindings(t *testing.T) {
 	}
 }
 
+func TestRunnerKeepsReportedFetchFailureWhenAgentExitsNonzero(t *testing.T) {
+	if os.Getenv("GO_WANT_FETCH_FAILURE_HELPER") == "1" {
+		_ = os.WriteFile(os.Getenv("FETCH_FAILURE_OUTPUT"), []byte(`{"fetch_failed":true,"fetch_error":"remote access denied","findings":[]}`), 0o600)
+		os.Exit(7)
+	}
+	dir := t.TempDir()
+	retries := 2
+	result, err := (Runner{}).Execute(context.Background(), Request{
+		Agent: config.Agent{
+			Type: "pi", Command: os.Args[0],
+			Args:    []string{"-test.run=TestRunnerKeepsReportedFetchFailureWhenAgentExitsNonzero", "--", "{prompt}"},
+			Env:     map[string]string{"GO_WANT_FETCH_FAILURE_HELPER": "1", "FETCH_FAILURE_OUTPUT": filepath.Join(dir, "review.json")},
+			Timeout: config.Duration(5 * time.Second), Retries: &retries,
+		},
+		WorkingDir: dir, RunDir: dir, Prompt: "review", OutputPath: filepath.Join(dir, "review.json"),
+	})
+	if err != nil || !result.FetchFailed || result.FetchError != "remote access denied" {
+		t.Fatalf("result = %#v, error = %v", result, err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "agent-attempt-2.stdout.log")); !os.IsNotExist(err) {
+		t.Fatalf("fetch failure unexpectedly retried: %v", err)
+	}
+}
+
+func TestFetchFailedResultRequiresReasonAndNoFindings(t *testing.T) {
+	for _, result := range []model.AgentResult{
+		{FetchFailed: true, Findings: []model.Finding{}},
+		{FetchFailed: true, FetchError: "remote unavailable", Findings: []model.Finding{{Title: "partial"}}},
+		{FetchError: "remote unavailable", Findings: []model.Finding{}},
+	} {
+		if err := validateResult(result); err == nil {
+			t.Fatalf("invalid fetch-failed result accepted: %#v", result)
+		}
+	}
+}
+
 func TestRunnerHonorsExecutionTimeout(t *testing.T) {
 	if os.Getenv("GO_WANT_TIMEOUT_HELPER") == "1" {
 		time.Sleep(5 * time.Second)

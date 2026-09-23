@@ -26,6 +26,7 @@ func TestBuildPromptUsesChineseInstructions(t *testing.T) {
 		"只上报真正重要且可操作的问题",
 		"标题直指具体问题；详情只说明触发条件、实际后果和必要的修复方向",
 		"skip --reason",
+		"fetch-failed --reason",
 		"每次调用提交工具都必须检查退出码",
 		"等待所有 finding 命令成功执行完成后直接正常退出",
 	} {

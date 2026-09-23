@@ -181,6 +181,36 @@ func TestSkipMarksResultWithoutFindings(t *testing.T) {
 	}
 }
 
+func TestFetchFailedAbortsReviewAndClearsPartialFindings(t *testing.T) {
+	repository, commit := createTestRepository(t)
+	output := filepath.Join(t.TempDir(), "review.json")
+	finding := []string{
+		"--output", output, "--repository", repository, "finding",
+		"--author", "Alice", "--commit", commit, "--file", "main.go",
+		"--line", "1", "--severity", "high", "--title", "bug", "--detail", "detail",
+	}
+	if err := Run(finding); err != nil {
+		t.Fatal(err)
+	}
+	if err := Run([]string{"--output", output, "fetch-failed", "--reason", "remote access denied"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := Run(finding); err == nil || !strings.Contains(err.Error(), "fetch-failed") {
+		t.Fatalf("finding after fetch failure error = %v", err)
+	}
+	b, err := os.ReadFile(output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result model.AgentResult
+	if err := json.Unmarshal(b, &result); err != nil {
+		t.Fatal(err)
+	}
+	if !result.FetchFailed || result.FetchError != "remote access denied" || len(result.Findings) != 0 {
+		t.Fatalf("fetch-failed result = %#v", result)
+	}
+}
+
 func createTestRepository(t *testing.T) (string, string) {
 	t.Helper()
 	repository := t.TempDir()

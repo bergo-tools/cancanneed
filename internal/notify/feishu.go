@@ -245,9 +245,21 @@ func formatCommitInfo(commit string, info model.CommitInfo) string {
 }
 
 func buildFailureCard(report model.ReviewFailureReport) map[string]any {
+	head := short(report.HeadSHA)
+	if head == "" {
+		head = "未获取"
+	}
+	branch := report.Branch
+	if branch == "" {
+		branch = "未确定"
+	}
+	from := short(report.FromSHA)
+	if from == "" {
+		from = "无记录"
+	}
 	content := fmt.Sprintf(
 		"**仓库：** %s\n**分支：** %s\n**待审查 HEAD：** `%s`\n**审查起点：** `%s`\n**Agent：** %s\n**连续失败：** %d 次\n**已重试：** %d 次\n**下次重试：** %s 后\n\n**最近错误：**\n%s",
-		escapeMarkdown(report.Repository), escapeMarkdown(report.Branch), short(report.HeadSHA), short(report.FromSHA), escapeMarkdown(report.Agent),
+		escapeMarkdown(report.Repository), escapeMarkdown(branch), head, from, escapeMarkdown(report.Agent),
 		report.FailureCount, report.RetryCount, escapeMarkdown(report.RetryAfter), escapeMarkdown(truncate(report.Error, 1500)),
 	)
 	return cardEnvelope("red", "Code Review失败通知", []any{markdownElement(content)})

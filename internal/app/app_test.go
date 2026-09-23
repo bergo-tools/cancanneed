@@ -326,10 +326,20 @@ func TestRunOnceReviewsLatestCommitWithoutBaseline(t *testing.T) {
 			t.Fatalf("submit-review.sh missing: %v", err)
 		}
 	}
+
+	service.Config.Repositories[0].Agent.Env["DUMMY_VERDICT"] = "fetch-failed"
+	if err := service.RunOnce(ctx); err == nil || !strings.Contains(err.Error(), "remote access denied") {
+		t.Fatalf("agent-reported fetch failure error = %v", err)
+	}
+	updated, _ = store.Get("demo")
+	if updated.HeadSHA != skippedHead || updated.ReviewFailure == nil || updated.ReviewFailure.Count != 1 || notifier.failureCalls != 1 {
+		t.Fatalf("fetch failure state = %#v, failure notifications = %d", updated, notifier.failureCalls)
+	}
 }
 
 type failOnceNotifier struct {
 	calls             int
+	failureCalls      int
 	failuresRemaining int
 }
 
@@ -344,7 +354,8 @@ func (n *failOnceNotifier) Notify(context.Context, model.Report, int) error {
 	return nil
 }
 
-func (*failOnceNotifier) NotifyReviewFailure(context.Context, model.ReviewFailureReport) error {
+func (n *failOnceNotifier) NotifyReviewFailure(context.Context, model.ReviewFailureReport) error {
+	n.failureCalls++
 	return nil
 }
 
@@ -440,6 +451,87 @@ func (n *failSecondCardOnceNotifier) Notify(_ context.Context, _ model.Report, c
 
 func (*failSecondCardOnceNotifier) NotifyReviewFailure(context.Context, model.ReviewFailureReport) error {
 	return nil
+}
+
+func TestInitialRemoteProbeFailureNotifiesWithoutHead(t *testing.T) {
+	dir := t.TempDir()
+	repositoryPath := filepath.Join(dir, "repository")
+	runGit(t, dir, "init", repositoryPath)
+	store, err := state.Open(filepath.Join(dir, "state"), "api")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	notifier := &recordingNotifier{}
+	service := &App{
+		Config: config.Config{
+			PollInterval: config.Duration(time.Minute), Concurrency: 1,
+			Repositories: []config.Repository{{Name: "api", Path: repositoryPath, Remote: "origin", Branch: "main", Agent: config.Agent{Type: "pi"}}},
+		},
+		State: store, Reviewer: review.Reviewer{RunsDir: filepath.Join(dir, "runs")}, Notifier: notifier,
+	}
+	if err := service.RunOnce(context.Background()); err == nil {
+		t.Fatal("missing remote did not fail the repository check")
+	}
+	current, exists := store.Get("api")
+	if !exists || current.HeadSHA != "" || current.ReviewFailure == nil || current.ReviewFailure.Count != 1 || len(notifier.failures) != 1 {
+		t.Fatalf("initial remote failure state = %#v, notifications = %#v", current, notifier.failures)
+	}
+}
+
+func TestRemoteHeadFailureNotifiesOnceAndClearsAfterRecovery(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	remote := filepath.Join(dir, "remote.git")
+	seed := filepath.Join(dir, "seed")
+	monitored := filepath.Join(dir, "monitored")
+	runGit(t, dir, "init", "--bare", "--initial-branch=main", remote)
+	runGit(t, dir, "init", "--initial-branch=main", seed)
+	writeFile(t, filepath.Join(seed, "main.go"), "package main\n")
+	runGit(t, seed, "add", "main.go")
+	runGit(t, seed, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "initial")
+	runGit(t, seed, "remote", "add", "origin", remote)
+	runGit(t, seed, "push", "origin", "main")
+	runGit(t, dir, "clone", remote, monitored)
+	head := strings.TrimSpace(runGit(t, seed, "rev-parse", "HEAD"))
+	store, err := state.Open(filepath.Join(dir, "state"), "api")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.Put("api", state.RepositoryState{HeadSHA: head, Branch: "main"}); err != nil {
+		t.Fatal(err)
+	}
+	notifier := &recordingNotifier{}
+	service := &App{
+		Config: config.Config{
+			PollInterval: config.Duration(time.Minute),
+			Concurrency:  1,
+			Repositories: []config.Repository{{Name: "api", Path: monitored, Remote: "origin", Branch: "main", Agent: config.Agent{Type: "pi"}}},
+		},
+		State: store, Reviewer: review.Reviewer{RunsDir: filepath.Join(dir, "runs")}, Notifier: notifier,
+	}
+	runGit(t, monitored, "remote", "set-url", "origin", filepath.Join(dir, "missing.git"))
+	for attempt := 1; attempt <= 2; attempt++ {
+		if err := service.RunOnce(ctx); err == nil {
+			t.Fatalf("remote failure attempt %d returned nil", attempt)
+		}
+		current, _ := store.Get("api")
+		if current.HeadSHA != head || current.ReviewFailure == nil || current.ReviewFailure.Count != attempt || current.ReviewFailure.HeadSHA != "" {
+			t.Fatalf("remote failure state after attempt %d = %#v", attempt, current)
+		}
+		if len(notifier.failures) != 1 || notifier.failures[0].HeadSHA != "" || !strings.Contains(notifier.failures[0].Error, "read origin/main") {
+			t.Fatalf("remote failure notifications = %#v", notifier.failures)
+		}
+	}
+	runGit(t, monitored, "remote", "set-url", "origin", remote)
+	if err := service.RunOnce(ctx); err != nil {
+		t.Fatalf("recovered remote check: %v", err)
+	}
+	current, _ := store.Get("api")
+	if current.HeadSHA != head || current.ReviewFailure != nil || len(notifier.failures) != 1 {
+		t.Fatalf("recovered state = %#v, notifications = %#v", current, notifier.failures)
+	}
 }
 
 func TestReviewFailuresNotifyFirstAndEveryThirtyForSameHead(t *testing.T) {
@@ -603,6 +695,11 @@ func appDummyAgent() {
 			"--title", "test finding", "--detail", "test detail")
 		if err := submit.Run(); err != nil {
 			os.Exit(24)
+		}
+	} else if verdict == "fetch-failed" {
+		submit := exec.Command(os.Getenv("CANCANNEED_SUBMIT_SCRIPT"), "fetch-failed", "--reason", "remote access denied")
+		if err := submit.Run(); err != nil {
+			os.Exit(25)
 		}
 	} else if verdict == "skip" {
 		submit := exec.Command(os.Getenv("CANCANNEED_SUBMIT_SCRIPT"), "skip", "--reason", "all commits opted out")

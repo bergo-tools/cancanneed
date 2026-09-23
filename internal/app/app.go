@@ -123,32 +123,48 @@ func (a *App) processRepository(ctx context.Context, repository config.Repositor
 	}
 
 	git := gitrepo.Repository{Path: repository.Path, Remote: repository.Remote}
+	checkFailure := func(branch, head string, checkErr error) error {
+		if ctx.Err() != nil {
+			return errors.Join(pendingDeliveryErr, ctx.Err())
+		}
+		checkErr = fmt.Errorf("check repository update: %w", checkErr)
+		if failureErr := a.recordReviewFailure(ctx, repository, current, branch, current.HeadSHA, head, checkErr); failureErr != nil {
+			return errors.Join(pendingDeliveryErr, checkErr, fmt.Errorf("record review failure: %w", failureErr))
+		}
+		return errors.Join(pendingDeliveryErr, checkErr)
+	}
+	branch := repository.Branch
+	if branch == "" {
+		branch = current.Branch
+	}
 	if err := git.Validate(ctx); err != nil {
-		return errors.Join(pendingDeliveryErr, err)
+		return checkFailure(branch, "", err)
 	}
-	branch, err := git.ResolveBranch(ctx, repository.Branch)
+	resolvedBranch, err := git.ResolveBranch(ctx, repository.Branch)
 	if err != nil {
-		return errors.Join(pendingDeliveryErr, err)
+		return checkFailure(branch, "", err)
 	}
+	branch = resolvedBranch
 	head, err := git.RemoteHead(ctx, branch)
 	if err != nil {
-		return errors.Join(pendingDeliveryErr, err)
+		return checkFailure(branch, "", err)
 	}
 
 	latestOnly := !exists || current.HeadSHA == "" || current.Branch != branch
 	reviewFrom := current.HeadSHA
 	if latestOnly {
 		if err := git.PinRemoteHead(ctx, branch, head); err != nil {
-			return errors.Join(pendingDeliveryErr, err)
+			return checkFailure(branch, head, err)
 		}
 		var err error
 		reviewFrom, err = git.ReviewBase(ctx, head)
 		if err != nil {
-			return errors.Join(pendingDeliveryErr, err)
+			return checkFailure(branch, head, err)
 		}
 		if !exists || current.Branch != branch {
 			current = state.RepositoryState{
 				Branch:                      branch,
+				ReviewFailure:               current.ReviewFailure,
 				PendingNotifications:        current.PendingNotifications,
 				PendingFailureNotifications: current.PendingFailureNotifications,
 			}
@@ -157,6 +173,12 @@ func (a *App) processRepository(ctx context.Context, repository config.Repositor
 		}
 	}
 	if !latestOnly && current.HeadSHA == head {
+		if current.ReviewFailure != nil {
+			current.ReviewFailure = nil
+			if err := a.State.Put(repository.Name, current); err != nil {
+				return errors.Join(pendingDeliveryErr, fmt.Errorf("clear recovered review failure: %w", err))
+			}
+		}
 		a.logger().Debug("repository unchanged", "repository", repository.Name, "branch", branch, "head", head)
 		return pendingDeliveryErr
 	}

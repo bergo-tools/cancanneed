@@ -37,7 +37,7 @@ func Run(arguments []string) error {
 		return errors.New("--output is required")
 	}
 	if len(remaining) == 0 {
-		return errors.New("expected finding or skip subcommand")
+		return errors.New("expected finding, skip, or fetch-failed subcommand")
 	}
 
 	switch remaining[0] {
@@ -53,8 +53,8 @@ func Run(arguments []string) error {
 			return err
 		}
 		return update(*output, func(result *model.AgentResult) error {
-			if result.Skipped {
-				return errors.New("review is already marked as skipped")
+			if result.Skipped || result.FetchFailed {
+				return errors.New("review is already marked as skipped or fetch-failed")
 			}
 			result.Findings = append(result.Findings, finding)
 			return nil
@@ -65,6 +65,9 @@ func Run(arguments []string) error {
 			return err
 		}
 		return update(*output, func(result *model.AgentResult) error {
+			if result.FetchFailed {
+				return errors.New("review is already marked as fetch-failed")
+			}
 			if result.Skipped {
 				return errors.New("review is already marked as skipped")
 			}
@@ -73,6 +76,15 @@ func Run(arguments []string) error {
 			}
 			result.Skipped = true
 			result.SkipReason = reason
+			return nil
+		})
+	case "fetch-failed":
+		reason, err := parseReason("fetch-failed", remaining[1:])
+		if err != nil {
+			return err
+		}
+		return update(*output, func(result *model.AgentResult) error {
+			*result = model.AgentResult{FetchFailed: true, FetchError: reason, Findings: []model.Finding{}}
 			return nil
 		})
 	default:
@@ -122,9 +134,13 @@ func parseFinding(arguments []string) (model.Finding, error) {
 }
 
 func parseSkip(arguments []string) (string, error) {
-	flags := flag.NewFlagSet("skip", flag.ContinueOnError)
+	return parseReason("skip", arguments)
+}
+
+func parseReason(command string, arguments []string) (string, error) {
+	flags := flag.NewFlagSet(command, flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
-	reason := flags.String("reason", "", "why all commits were skipped")
+	reason := flags.String("reason", "", "reason for this result")
 	if err := flags.Parse(arguments); err != nil {
 		return "", err
 	}

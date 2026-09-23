@@ -90,6 +90,9 @@ func runAttempt(parent context.Context, request Request, attempt int) (model.Age
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 	if err := cmd.Run(); err != nil {
+		if result, readErr := readResult(request.OutputPath); readErr == nil && result.FetchFailed {
+			return result, nil
+		}
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			return model.AgentResult{}, fmt.Errorf("timed out after %s", request.Agent.Timeout.Value())
 		}
@@ -191,6 +194,16 @@ func ensureJSONEOF(decoder *json.Decoder) error {
 func validateResult(result model.AgentResult) error {
 	if result.Findings == nil {
 		return errors.New("findings must be a JSON array")
+	}
+	if result.FetchFailed {
+		if strings.TrimSpace(result.FetchError) == "" {
+			return errors.New("fetch_error is required when fetch_failed is true")
+		}
+		if result.Skipped || result.SkipReason != "" || len(result.Findings) != 0 {
+			return errors.New("fetch-failed result cannot contain skipped review or findings")
+		}
+	} else if result.FetchError != "" {
+		return errors.New("fetch_error requires fetch_failed=true")
 	}
 	if result.Skipped {
 		if strings.TrimSpace(result.SkipReason) == "" {

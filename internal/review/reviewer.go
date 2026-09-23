@@ -92,6 +92,9 @@ func (r Reviewer) Review(ctx context.Context, request Request) (model.Report, st
 	if err != nil {
 		return model.Report{}, runDir, err
 	}
+	if result.FetchFailed {
+		return model.Report{}, runDir, fmt.Errorf("agent could not fetch Git repository: %s", result.FetchError)
+	}
 	git := gitrepo.Repository{Path: request.Repository.Path, Remote: request.Repository.Remote}
 	reviewedHead, err := git.ReviewHead(ctx)
 	if err != nil {
@@ -286,13 +289,14 @@ func buildPrompt(request Request, submitPath string) string {
 执行规则：
 1. 不要编辑仓库文件、创建提交、切换分支或推送任何内容。
 2. 自行使用 git fetch 拉取并检查变更，以 FETCH_HEAD 作为本次审查的最新终点。按需阅读相关上下文代码，不要运行测试，也不要写入，只进行review。
-3. 每发现一个符合上述上报标准的问题，调用一次下面的工具；多个问题可以并发提交：
+3. 如果 git fetch 因网络、认证、权限等原因失败，立即调用 %s fetch-failed --reason "<简洁的 Git 错误>"；确认命令成功后停止审查并正常退出。不要沿用旧的 FETCH_HEAD，也不要继续提交 finding。cancanneed 会把本轮记为审查失败。
+4. 每发现一个符合上述上报标准的问题，调用一次下面的工具；多个问题可以并发提交：
    %s finding --author "<git show -s --format=%%an 得到的提交作者名称>" --commit "<完整提交 SHA>" --file "<仓库相对文件路径>" --line <新文件中的行号> --severity "<critical|high|medium|low|info>" --title "<问题标题>" --detail "<问题原因和修复建议>"
-4. 每次调用提交工具都必须检查退出码。如果工具报告参数错误或 commit 不存在，重新 fetch、确认完整 SHA、修正参数后再次调用；只有退出码为 0 才表示该 finding 提交成功。
-5. 等待所有 finding 命令成功执行完成后直接正常退出。没有 finding 时也直接正常退出。
+5. 每次调用提交工具都必须检查退出码。如果工具报告参数错误或 commit 不存在，重新 fetch、确认完整 SHA、修正参数后再次调用；只有退出码为 0 才表示该 finding 提交成功。若重新 fetch 失败，按第 3 条报告失败。
+6. 等待所有 finding 命令成功执行完成后直接正常退出。没有 finding 时也直接正常退出。
 
 提交工具会创建并安全更新结构化 JSON 结果。不要自行创建或编辑 review.json
-`, introduction, coverage, shellCommand(submitPath), shellCommand(submitPath))
+`, introduction, coverage, shellCommand(submitPath), shellCommand(submitPath), shellCommand(submitPath))
 }
 
 func writeRequestMetadata(path string, request Request) error {

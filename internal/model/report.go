@@ -21,9 +21,11 @@ type AuthorMention struct {
 
 // AgentResult is the JSON contract an agent must submit.
 type AgentResult struct {
-	Skipped    bool      `json:"skipped,omitempty"`
-	SkipReason string    `json:"skip_reason,omitempty"`
-	Findings   []Finding `json:"findings"`
+	Skipped     bool      `json:"skipped,omitempty"`
+	SkipReason  string    `json:"skip_reason,omitempty"`
+	FetchFailed bool      `json:"fetch_failed,omitempty"`
+	FetchError  string    `json:"fetch_error,omitempty"`
+	Findings    []Finding `json:"findings"`
 }
 
 // CommitInfo is trusted metadata read from Git after the agent finishes.
