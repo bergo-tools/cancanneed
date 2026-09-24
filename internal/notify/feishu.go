@@ -25,7 +25,12 @@ type Feishu struct {
 	Now            func() time.Time
 }
 
-const maxFindingsPerCard = 8
+const (
+	maxFindingsPerCard  = 8
+	maxWebhookBodyBytes = 20_000
+	// Leave room for timestamp/sign, which are added only when sending.
+	maxUnsignedCardBytes = 19 * 1024
+)
 
 type commitFindings struct {
 	commit   string
@@ -69,6 +74,9 @@ func (f Feishu) sendCard(ctx context.Context, payload map[string]any) error {
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return fmt.Errorf("encode Feishu card: %w", err)
+	}
+	if len(body) > maxWebhookBodyBytes {
+		return fmt.Errorf("Feishu card is %d bytes, exceeding the %d-byte webhook limit", len(body), maxWebhookBodyBytes)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, f.Webhook, bytes.NewReader(body))
 	if err != nil {
@@ -151,33 +159,70 @@ func buildCards(report model.Report, mentions map[string]model.AuthorMention) []
 
 	var cards []map[string]any
 	for _, group := range groups {
-		parts := packCommitGroups(group.commits)
 		authorTotal := findingCount(group.commits)
+		mention := mentions[strings.ToLower(group.author)]
+		parts := packCommitGroups(report, group.author, mention, group.commits, authorTotal)
 		for part, commits := range parts {
-			cards = append(cards, buildAuthorCard(report, group.author, mentions[strings.ToLower(group.author)], commits, authorTotal, part+1, len(parts)))
+			cards = append(cards, buildAuthorCard(report, group.author, mention, commits, authorTotal, part+1, len(parts)))
 		}
 	}
 	return cards
 }
 
-func packCommitGroups(commits []commitFindings) [][]commitFindings {
+func packCommitGroups(report model.Report, author string, mention model.AuthorMention, commits []commitFindings, authorTotal int) [][]commitFindings {
 	var parts [][]commitFindings
 	var current []commitFindings
 	currentFindings := 0
-	for _, commit := range commits {
-		count := len(commit.findings)
-		if len(current) != 0 && currentFindings+count > maxFindingsPerCard {
+	flush := func() {
+		if len(current) != 0 {
 			parts = append(parts, current)
 			current = nil
 			currentFindings = 0
 		}
-		current = append(current, commit)
-		currentFindings += count
 	}
-	if len(current) != 0 {
-		parts = append(parts, current)
+	fits := func(candidate []commitFindings) bool {
+		// The final part numbers are shorter than these placeholders.
+		card := buildAuthorCard(report, author, mention, candidate, authorTotal, 999999, 999999)
+		body, err := json.Marshal(card)
+		return err == nil && len(body) <= maxUnsignedCardBytes
 	}
+	for _, commit := range commits {
+		candidate := append(append([]commitFindings(nil), current...), commit)
+		if len(current) != 0 && (currentFindings+len(commit.findings) > maxFindingsPerCard || !fits(candidate)) {
+			flush()
+			candidate = []commitFindings{commit}
+		}
+		if len(commit.findings) <= maxFindingsPerCard && fits(candidate) {
+			current = candidate
+			currentFindings += len(commit.findings)
+			continue
+		}
+
+		// Keep a commit together where possible; only split its findings when
+		// the entire commit cannot fit in one webhook request.
+		for _, finding := range commit.findings {
+			candidate = appendFinding(current, commit, finding)
+			if len(current) != 0 && (currentFindings+1 > maxFindingsPerCard || !fits(candidate)) {
+				flush()
+				candidate = appendFinding(nil, commit, finding)
+			}
+			current = candidate
+			currentFindings++
+		}
+	}
+	flush()
 	return parts
+}
+
+func appendFinding(current []commitFindings, commit commitFindings, finding model.Finding) []commitFindings {
+	candidate := append([]commitFindings(nil), current...)
+	if len(candidate) != 0 && candidate[len(candidate)-1].commit == commit.commit {
+		last := candidate[len(candidate)-1]
+		last.findings = append(append([]model.Finding(nil), last.findings...), finding)
+		candidate[len(candidate)-1] = last
+		return candidate
+	}
+	return append(candidate, commitFindings{commit: commit.commit, info: commit.info, findings: []model.Finding{finding}})
 }
 
 func findingCount(commits []commitFindings) int {
@@ -201,17 +246,17 @@ func buildAuthorCard(report model.Report, author string, mention model.AuthorMen
 	if parts > 1 {
 		partLine = fmt.Sprintf("\n**分片：** %d/%d", part, parts)
 	}
-	authorLabel := escapeMarkdown(author)
-	if mention.FeishuID != "" && mention.Name != "" {
-		authorLabel = fmt.Sprintf("<at id=%s>%s</at>", mention.FeishuID, escapeMentionText(mention.Name))
+	authorLabel := escapeMarkdown(truncate(author, 80))
+	if mention.FeishuID != "" && len(mention.FeishuID) <= 128 && mention.Name != "" {
+		authorLabel = fmt.Sprintf("<at id=%s>%s</at>", mention.FeishuID, escapeMentionText(truncate(mention.Name, 80)))
 		if !strings.EqualFold(strings.TrimSpace(mention.Name), strings.TrimSpace(author)) {
-			authorLabel += "（Git: " + escapeMarkdown(author) + "）"
+			authorLabel += "（Git: " + escapeMarkdown(truncate(author, 80)) + "）"
 		}
 	}
 	elements := []any{markdownElement(fmt.Sprintf(
 		"**仓库：** %s\n**作者：** %s\n**分支：** %s\n**变更：** `%s` → `%s`\n**Agent：** %s\n**问题：** 本卡 %d 条，该作者共 %d 条%s\n\n%s",
-		escapeMarkdown(report.Repository), authorLabel, escapeMarkdown(report.Branch), short(report.FromSHA), short(report.ToSHA), escapeMarkdown(report.Agent),
-		findingCount(commits), authorTotal, partLine, escapeMarkdown(truncate(report.Summary, 1200)),
+		escapeMarkdown(truncate(report.Repository, 80)), authorLabel, escapeMarkdown(truncate(report.Branch, 80)), short(report.FromSHA), short(report.ToSHA), escapeMarkdown(truncate(report.Agent, 80)),
+		findingCount(commits), authorTotal, partLine, escapeMarkdown(truncate(report.Summary, 300)),
 	))}
 
 	for _, commit := range commits {
@@ -230,12 +275,12 @@ func formatCommitInfo(commit string, info model.CommitInfo) string {
 	}
 	content := "**Commit " + label + "**"
 	if info.Subject != "" {
-		content += "\n**标题：** " + escapeMarkdown(truncate(info.Subject, 300))
+		content += "\n**标题：** " + escapeMarkdown(truncate(info.Subject, 200))
 	}
 	if info.Author != "" {
-		content += "\n**Git 作者：** " + escapeMarkdown(info.Author)
+		content += "\n**Git 作者：** " + escapeMarkdown(truncate(info.Author, 80))
 		if info.AuthorEmail != "" {
-			content += " <`" + escapeBackticks(info.AuthorEmail) + "`>"
+			content += " <`" + escapeBackticks(truncate(info.AuthorEmail, 120)) + "`>"
 		}
 	}
 	if !info.CommittedAt.IsZero() {
@@ -259,18 +304,18 @@ func buildFailureCard(report model.ReviewFailureReport) map[string]any {
 	}
 	content := fmt.Sprintf(
 		"**仓库：** %s\n**分支：** %s\n**待审查 HEAD：** `%s`\n**审查起点：** `%s`\n**Agent：** %s\n**连续失败：** %d 次\n**已重试：** %d 次\n**下次重试：** %s 后\n\n**最近错误：**\n%s",
-		escapeMarkdown(report.Repository), escapeMarkdown(branch), head, from, escapeMarkdown(report.Agent),
-		report.FailureCount, report.RetryCount, escapeMarkdown(report.RetryAfter), escapeMarkdown(truncate(report.Error, 1500)),
+		escapeMarkdown(truncate(report.Repository, 80)), escapeMarkdown(truncate(branch, 80)), head, from, escapeMarkdown(truncate(report.Agent, 80)),
+		report.FailureCount, report.RetryCount, escapeMarkdown(truncate(report.RetryAfter, 80)), escapeMarkdown(truncate(report.Error, 1000)),
 	)
 	return cardEnvelope("red", "Code Review失败通知", []any{markdownElement(content)})
 }
 
 func formatFinding(finding model.Finding) string {
-	location := finding.File
+	location := truncate(finding.File, 240)
 	if finding.Line > 0 {
 		location += fmt.Sprintf(":%d", finding.Line)
 	}
-	content := fmt.Sprintf("**[%s] %s**", strings.ToUpper(finding.Severity), escapeMarkdown(finding.Title))
+	content := fmt.Sprintf("**[%s] %s**", strings.ToUpper(finding.Severity), escapeMarkdown(truncate(finding.Title, 160)))
 	if location != "" {
 		content += "\n`" + escapeBackticks(location) + "`"
 	}
@@ -312,6 +357,7 @@ func truncate(value string, limit int) string {
 }
 
 func escapeMarkdown(value string) string {
+	value = escapeMentionText(value)
 	value = strings.ReplaceAll(value, "\\", "\\\\")
 	for _, marker := range []string{"*", "_", "~"} {
 		value = strings.ReplaceAll(value, marker, "\\"+marker)
@@ -319,7 +365,9 @@ func escapeMarkdown(value string) string {
 	return value
 }
 
-func escapeBackticks(value string) string { return strings.ReplaceAll(value, "`", "'") }
+func escapeBackticks(value string) string {
+	return escapeMentionText(strings.ReplaceAll(value, "`", "'"))
+}
 
 func escapeMentionText(value string) string {
 	value = strings.ReplaceAll(value, "&", "&amp;")

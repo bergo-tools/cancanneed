@@ -35,7 +35,7 @@ repositories:
 
 | 配置项 | 作用与默认值 |
 | --- | --- |
-| `repositories` | 监控的仓库列表，至少一个；每项的 `name` 必须唯一，`path` 指向本地 Git 工作区。 |
+| `repositories` | 监控的仓库列表，至少一个；每项的 `name` 和 Git 工作区必须唯一。要同时监控同一仓库的不同分支，请重新 clone 到其他位置或使用 `git worktree` 创建独立工作区。 |
 | `repositories[].remote` / `branch` | 远端默认 `origin`；未指定分支时依次尝试远端 HEAD、`main`、`master`。 |
 | `poll_interval` | 每个仓库两轮检查之间的间隔，默认 `5m`；整轮审查失败后也按此间隔重试。 |
 | `concurrency` | `once` 模式同时处理的仓库数，默认 `4`；`run` 模式每仓库一个 goroutine。 |
@@ -118,7 +118,7 @@ Agent 成功完成审查后，cancanneed 读取它审查现场的本地 `FETCH_H
 
 ## 通知与失败重试
 
-发现重要问题后，cancanneed 从本地 Git 读取相关 commit 的标题、作者、邮箱和提交时间。结果卡片标题为“Code Review结果通知”，按作者分卡，并在每位作者下面按 commit 展示 finding；同一 commit 的 finding 不会被拆开。单卡以 8 个 finding 为拆分目标，内容过多时会发送多张卡片。没有 finding 或全部跳过时只推进 HEAD，不发送结果通知。
+发现重要问题后，cancanneed 从本地 Git 读取相关 commit 的标题、作者、邮箱和提交时间。结果卡片标题为“Code Review结果通知”，按作者分卡，并在每位作者下面按 commit 展示 finding；同一 commit 的 finding 尽量放在同一张卡片，超过单卡 8 条或飞书请求体大小限制时才拆开。卡片按实际字节数控制大小，过长的展示文本会截断。没有 finding 或全部跳过时只推进 HEAD，不发送结果通知。
 
 飞书发送进度保存在仓库 state 中。发送失败不会重新审查已完成的提交，也不会阻止后续审查；下次轮询会从未发送成功的卡片继续。若进程恰好在发送成功、进度落盘之前退出，重启后可能重发该卡片。
 

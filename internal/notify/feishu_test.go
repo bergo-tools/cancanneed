@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -69,6 +70,23 @@ func TestFeishuRejectsApplicationError(t *testing.T) {
 	}
 }
 
+func TestFeishuRejectsOversizedCardBeforeHTTP(t *testing.T) {
+	var called atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		called.Store(true)
+		_, _ = w.Write([]byte(`{"code":0}`))
+	}))
+	defer server.Close()
+	feishu := Feishu{Webhook: server.URL, Client: server.Client()}
+	card := cardEnvelope("red", "oversized", []any{markdownElement(strings.Repeat("x", maxWebhookBodyBytes))})
+	if err := feishu.sendCard(context.Background(), card); err == nil || !strings.Contains(err.Error(), "exceeding") {
+		t.Fatalf("oversized card error = %v", err)
+	}
+	if called.Load() {
+		t.Fatal("oversized card was sent")
+	}
+}
+
 func TestFeishuGroupsCardsByAuthorAndCommitAndSplitsLargeGroups(t *testing.T) {
 	report := model.Report{
 		Repository: "api", Branch: "main", Verdict: "request_changes",
@@ -114,6 +132,111 @@ func TestFeishuGroupsCardsByAuthorAndCommitAndSplitsLargeGroups(t *testing.T) {
 	}
 }
 
+func TestFeishuSplitsLargeCommitByWebhookBytes(t *testing.T) {
+	report := model.Report{
+		Repository: "api", Branch: "main", Agent: "pi", Verdict: "request_changes",
+		Commits: []model.CommitInfo{{Commit: strings.Repeat("a", 40), Author: "Alice", Subject: "large review"}},
+	}
+	for i := 0; i < maxFindingsPerCard; i++ {
+		report.Findings = append(report.Findings, model.Finding{
+			Author: "Alice", Commit: strings.Repeat("a", 40), Severity: "high",
+			File: "main.go", Line: i + 1, Title: fmt.Sprintf("issue-%d", i),
+			Detail: strings.Repeat("问题", 600),
+		})
+	}
+	cards := buildCards(report, nil)
+	if len(cards) < 2 {
+		t.Fatalf("large commit produced %d card(s), want multiple", len(cards))
+	}
+	var allContents strings.Builder
+	for _, card := range cards {
+		allContents.WriteString(cardMarkdownContents(t, card))
+	}
+	for i := 0; i < maxFindingsPerCard; i++ {
+		if title := fmt.Sprintf("issue-%d", i); strings.Count(allContents.String(), title) != 1 {
+			t.Fatalf("finding %q was lost or duplicated", title)
+		}
+	}
+	var delivered atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		var payload json.RawMessage
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Errorf("decode card: %v", err)
+		} else if len(payload) > maxWebhookBodyBytes {
+			t.Errorf("sent card is %d bytes", len(payload))
+		}
+		delivered.Add(1)
+		_, _ = w.Write([]byte(`{"code":0,"msg":"ok"}`))
+	}))
+	defer server.Close()
+	feishu := Feishu{Webhook: server.URL, Secret: "secret", Client: server.Client()}
+	for i, card := range cards {
+		body, err := json.Marshal(card)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(body) > maxUnsignedCardBytes {
+			t.Fatalf("card %d is %d bytes, limit %d", i, len(body), maxUnsignedCardBytes)
+		}
+		if err := feishu.Notify(context.Background(), report, i); err != nil {
+			t.Fatalf("send card %d: %v", i, err)
+		}
+	}
+	if got := delivered.Load(); got != int32(len(cards)) {
+		t.Fatalf("delivered %d cards, want %d", got, len(cards))
+	}
+}
+
+func TestFeishuSingleLongFindingFitsWebhook(t *testing.T) {
+	long := strings.Repeat("\u2028", 3000)
+	commit := strings.Repeat("a", 40)
+	report := model.Report{
+		Repository: long, Branch: long, Agent: long, Summary: long, Verdict: "request_changes",
+		Commits: []model.CommitInfo{{Commit: commit, Author: long, AuthorEmail: long, Subject: long}},
+		Findings: []model.Finding{{Author: long, Commit: commit, File: long, Line: 1,
+			Severity: "high", Title: long, Detail: long}},
+	}
+	cards := buildCards(report, map[string]model.AuthorMention{
+		strings.ToLower(long): {FeishuID: strings.Repeat("a", 128), Name: long},
+	})
+	if len(cards) != 1 {
+		t.Fatalf("single finding produced %d cards", len(cards))
+	}
+	body, err := json.Marshal(cards[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(body) > maxUnsignedCardBytes {
+		t.Fatalf("single-finding card is %d bytes, limit %d", len(body), maxUnsignedCardBytes)
+	}
+}
+
+func TestFeishuEscapesUntrustedMentions(t *testing.T) {
+	commit := strings.Repeat("a", 40)
+	malicious := "<at id=all></at>"
+	report := model.Report{
+		Repository: malicious, Branch: malicious, Agent: "pi", Verdict: "request_changes",
+		Commits: []model.CommitInfo{{Commit: commit, Author: "Alice", Subject: malicious, AuthorEmail: malicious}},
+		Findings: []model.Finding{{Author: "Alice", Commit: commit, Severity: "high",
+			File: malicious, Line: 1, Title: malicious, Detail: malicious}},
+	}
+	cards := buildCards(report, map[string]model.AuthorMention{"alice": {FeishuID: "ou_alice", Name: "张三"}})
+	if len(cards) != 1 {
+		t.Fatalf("card count = %d", len(cards))
+	}
+	contents := cardMarkdownContents(t, cards[0])
+	if strings.Contains(contents, malicious) {
+		t.Fatalf("untrusted mention was not escaped: %s", contents)
+	}
+	if !strings.Contains(contents, "&lt;at id=all&gt;&lt;/at&gt;") {
+		t.Fatalf("escaped mention text missing: %s", contents)
+	}
+	if !strings.Contains(contents, "<at id=ou_alice>张三</at>") {
+		t.Fatalf("trusted author mention was removed: %s", contents)
+	}
+}
+
 func TestFeishuMentionsMappedAuthor(t *testing.T) {
 	report := model.Report{
 		Repository: "api", Branch: "main", Verdict: "request_changes",
@@ -150,6 +273,17 @@ func TestFeishuBuildsFailureNotification(t *testing.T) {
 			t.Fatalf("unknown-head failure card does not contain %q: %s", want, unknownHead)
 		}
 	}
+	long := strings.Repeat("\u2028", 3000)
+	largeFailure := buildFailureCard(model.ReviewFailureReport{
+		Repository: long, Branch: long, Agent: long, Error: long, RetryAfter: long,
+	})
+	body, err := json.Marshal(largeFailure)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(body) > maxUnsignedCardBytes {
+		t.Fatalf("failure card is %d bytes, limit %d", len(body), maxUnsignedCardBytes)
+	}
 }
 
 func cardText(t *testing.T, card map[string]any) string {
@@ -180,4 +314,23 @@ func cardTitle(t *testing.T, payload map[string]any) string {
 		t.Fatalf("missing title content: %#v", title)
 	}
 	return content
+}
+
+func cardMarkdownContents(t *testing.T, payload map[string]any) string {
+	t.Helper()
+	card, ok := payload["card"].(map[string]any)
+	if !ok {
+		t.Fatalf("missing card: %#v", payload)
+	}
+	elements, ok := card["elements"].([]any)
+	if !ok {
+		t.Fatalf("missing elements: %#v", card)
+	}
+	var contents []string
+	for _, element := range elements {
+		entry := element.(map[string]any)
+		text := entry["text"].(map[string]any)
+		contents = append(contents, text["content"].(string))
+	}
+	return strings.Join(contents, "\n")
 }

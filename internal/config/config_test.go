@@ -2,8 +2,10 @@ package config
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -165,5 +167,74 @@ func TestLoadRejectsInvalidAuthorMention(t *testing.T) {
 	}
 	if _, err := Load(configPath); err == nil {
 		t.Fatal("expected invalid author mention to be rejected")
+	}
+}
+
+func TestLoadRejectsOversizedAuthorMentionID(t *testing.T) {
+	dir := t.TempDir()
+	data := `{"Alice":{"feishu_id":"` + strings.Repeat("a", 129) + `","name":"张三"}}`
+	if err := os.WriteFile(filepath.Join(dir, "authors.json"), []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(dir, "cancanneed.yaml")
+	configData := "authors_file: authors.json\nrepositories:\n  - name: api\n    path: ./repo\n    agent:\n      type: pi\n"
+	if err := os.WriteFile(configPath, []byte(configData), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(configPath); err == nil || !strings.Contains(err.Error(), "invalid feishu_id") {
+		t.Fatalf("oversized Feishu ID error = %v", err)
+	}
+}
+
+func TestLoadRejectsDuplicateGitWorktree(t *testing.T) {
+	dir := t.TempDir()
+	repository := filepath.Join(dir, "repository")
+	if output, err := exec.Command("git", "init", repository).CombinedOutput(); err != nil {
+		t.Fatalf("initialize repository: %v: %s", err, output)
+	}
+	alias := filepath.Join(dir, "alias")
+	if err := os.Symlink(repository, alias); err != nil {
+		t.Fatal(err)
+	}
+	subdirectory := filepath.Join(repository, "nested")
+	if err := os.Mkdir(subdirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, secondPath := range []string{repository, alias, subdirectory} {
+		t.Run(filepath.Base(secondPath), func(t *testing.T) {
+			configPath := filepath.Join(t.TempDir(), "cancanneed.yaml")
+			data := "repositories:\n  - name: first\n    path: " + repository + "\n    agent:\n      type: pi\n  - name: second\n    path: " + secondPath + "\n    agent:\n      type: pi\n"
+			if err := os.WriteFile(configPath, []byte(data), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			_, err := Load(configPath)
+			if err == nil || !strings.Contains(err.Error(), "共用同一个 Git 工作区") || !strings.Contains(err.Error(), "clone") || !strings.Contains(err.Error(), "git worktree") {
+				t.Fatalf("duplicate worktree error = %v", err)
+			}
+		})
+	}
+}
+
+func TestLoadAllowsSeparateGitWorktrees(t *testing.T) {
+	dir := t.TempDir()
+	repository := filepath.Join(dir, "repository")
+	linked := filepath.Join(dir, "linked")
+	for _, arguments := range [][]string{
+		{"init", repository},
+		{"-C", repository, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "--allow-empty", "-m", "initial"},
+		{"-C", repository, "worktree", "add", "-b", "linked", linked},
+	} {
+		if output, err := exec.Command("git", arguments...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", arguments, err, output)
+		}
+	}
+	configPath := filepath.Join(dir, "cancanneed.yaml")
+	data := "repositories:\n  - name: first\n    path: " + repository + "\n    agent:\n      type: pi\n  - name: second\n    path: " + linked + "\n    agent:\n      type: pi\n"
+	if err := os.WriteFile(configPath, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(configPath); err != nil {
+		t.Fatalf("separate worktrees should be allowed: %v", err)
 	}
 }

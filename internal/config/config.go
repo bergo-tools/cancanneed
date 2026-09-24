@@ -1,11 +1,13 @@
 package config
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -219,7 +221,7 @@ func loadAuthorMentions(path string) (map[string]model.AuthorMention, error) {
 		if mention.FeishuID == "" || mention.Name == "" {
 			return nil, fmt.Errorf("authors file entry %q requires feishu_id and name", author)
 		}
-		if !feishuIDPattern.MatchString(mention.FeishuID) {
+		if len(mention.FeishuID) > 128 || !feishuIDPattern.MatchString(mention.FeishuID) {
 			return nil, fmt.Errorf("authors file entry %q has invalid feishu_id", author)
 		}
 		normalized := strings.ToLower(author)
@@ -343,6 +345,7 @@ func (c Config) validate() error {
 		problems = append(problems, errors.New("at least one repository is required"))
 	}
 	names := make(map[string]struct{}, len(c.Repositories))
+	workspaces := make([]configuredWorkspace, 0, len(c.Repositories))
 	for i, repo := range c.Repositories {
 		prefix := fmt.Sprintf("repositories[%d]", i)
 		if strings.TrimSpace(repo.Name) == "" {
@@ -354,6 +357,15 @@ func (c Config) validate() error {
 		}
 		if repo.Path == "" {
 			problems = append(problems, fmt.Errorf("%s.path is required", prefix))
+		} else {
+			identity := identifyWorkspace(repo.Path)
+			for _, previous := range workspaces {
+				if identity.sameAs(previous.identity) {
+					problems = append(problems, fmt.Errorf("repositories[%d] %q 与 %q 共用同一个 Git 工作区（%s）；请将仓库重新 clone 到其他位置，或使用 git worktree 创建独立工作区", i, previous.name, repo.Name, repo.Path))
+					break
+				}
+			}
+			workspaces = append(workspaces, configuredWorkspace{name: repo.Name, identity: identity})
 		}
 		if repo.Agent.Type != "pi" && repo.Agent.Type != "ohmypi" && repo.Agent.Type != "crush" {
 			problems = append(problems, fmt.Errorf("%s.agent.type must be pi, ohmypi, or crush", prefix))
@@ -385,6 +397,56 @@ func (c Config) validate() error {
 		}
 	}
 	return errors.Join(problems...)
+}
+
+type configuredWorkspace struct {
+	name     string
+	identity workspaceIdentity
+}
+
+type workspaceIdentity struct {
+	gitDir bool
+	path   string
+}
+
+func identifyWorkspace(path string) workspaceIdentity {
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		path = resolved
+	}
+	path = filepath.Clean(path)
+	identity := workspaceIdentity{path: path}
+	info, err := os.Stat(path)
+	if err != nil || !info.IsDir() {
+		return identity
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	// FETCH_HEAD is stored in this per-worktree Git directory. Linked
+	// worktrees have different directories and can therefore run in parallel.
+	output, err := exec.CommandContext(ctx, "git", "-C", path, "rev-parse", "--absolute-git-dir").Output()
+	if err != nil {
+		return identity
+	}
+	gitDir := strings.TrimSpace(string(output))
+	if gitDir == "" {
+		return identity
+	}
+	if resolved, err := filepath.EvalSymlinks(gitDir); err == nil {
+		gitDir = resolved
+	}
+	return workspaceIdentity{gitDir: true, path: filepath.Clean(gitDir)}
+}
+
+func (identity workspaceIdentity) sameAs(other workspaceIdentity) bool {
+	if identity.gitDir != other.gitDir {
+		return false
+	}
+	if identity.path == other.path {
+		return true
+	}
+	first, firstErr := os.Stat(identity.path)
+	second, secondErr := os.Stat(other.path)
+	return firstErr == nil && secondErr == nil && os.SameFile(first, second)
 }
 
 func absoluteFrom(baseDir, path string) string {
