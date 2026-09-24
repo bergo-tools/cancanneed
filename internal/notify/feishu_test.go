@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -209,6 +210,87 @@ func TestFeishuSingleLongFindingFitsWebhook(t *testing.T) {
 	}
 	if len(body) > maxUnsignedCardBytes {
 		t.Fatalf("single-finding card is %d bytes, limit %d", len(body), maxUnsignedCardBytes)
+	}
+}
+
+func TestFeishuTrimsSingleFindingAfterEscaping(t *testing.T) {
+	long := strings.Repeat("&", 3000)
+	commit := strings.Repeat("a", 40)
+	report := model.Report{
+		Repository: long, Branch: long, Agent: long, Summary: long, Verdict: "request_changes",
+		Commits: []model.CommitInfo{{Commit: commit, Author: long, AuthorEmail: long, Subject: long}},
+		Findings: []model.Finding{{Author: long, Commit: commit, File: long, Line: 1,
+			Severity: "high", Title: long, Detail: long}},
+	}
+	mentions := map[string]model.AuthorMention{
+		long: {FeishuID: "ou_" + strings.Repeat("a", 125), Name: long},
+	}
+	feishu := Feishu{AuthorMentions: mentions}
+	if count := feishu.NotificationCount(report); count != 1 {
+		t.Fatalf("notification count = %d, want 1", count)
+	}
+	cards := buildCards(report, mentions)
+	if len(cards) != 1 {
+		t.Fatalf("single finding produced %d cards", len(cards))
+	}
+	body, err := json.Marshal(cards[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(body) > maxUnsignedCardBytes {
+		t.Fatalf("single-finding card is %d bytes, limit %d", len(body), maxUnsignedCardBytes)
+	}
+	elements := cards[0]["card"].(map[string]any)["elements"].([]any)
+	findingText := elements[2].(map[string]any)["text"].(map[string]any)["content"].(string)
+	if len(findingText) >= len(formatFinding(report.Findings[0])) || !strings.Contains(findingText, "…") {
+		t.Fatalf("oversized finding was not trimmed: %d bytes", len(findingText))
+	}
+	if report.Findings[0].Detail != long {
+		t.Fatal("original finding was modified")
+	}
+
+	var sentBytes atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		payload, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read card: %v", err)
+		} else {
+			sentBytes.Store(int64(len(payload)))
+		}
+		_, _ = w.Write([]byte(`{"code":0,"msg":"ok"}`))
+	}))
+	defer server.Close()
+	feishu.Webhook = server.URL
+	feishu.Secret = "secret"
+	feishu.Client = server.Client()
+	if err := feishu.Notify(context.Background(), report, 0); err != nil {
+		t.Fatalf("send trimmed finding: %v", err)
+	}
+	if got := sentBytes.Load(); got == 0 || got > maxWebhookBodyBytes {
+		t.Fatalf("sent card is %d bytes, limit %d", got, maxWebhookBodyBytes)
+	}
+
+	report.Findings = append(report.Findings, model.Finding{
+		Author: long, Commit: commit, File: "normal.go", Line: 2,
+		Severity: "medium", Title: "second finding", Detail: "another issue",
+	})
+	cards = buildCards(report, mentions)
+	if count := feishu.NotificationCount(report); count != len(cards) {
+		t.Fatalf("notification count = %d, built cards = %d", count, len(cards))
+	}
+	var allContents strings.Builder
+	for i, card := range cards {
+		body, err := json.Marshal(card)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(body) > maxUnsignedCardBytes {
+			t.Fatalf("card %d is %d bytes, limit %d", i, len(body), maxUnsignedCardBytes)
+		}
+		allContents.WriteString(cardMarkdownContents(t, card))
+	}
+	if count := strings.Count(allContents.String(), "second finding"); count != 1 {
+		t.Fatalf("following finding appears %d times, want once", count)
 	}
 }
 

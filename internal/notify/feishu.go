@@ -26,8 +26,11 @@ type Feishu struct {
 }
 
 const (
-	maxFindingsPerCard  = 8
-	maxWebhookBodyBytes = 20_000
+	maxFindingsPerCard    = 8
+	maxWebhookBodyBytes   = 20_000
+	maxFindingFileRunes   = 240
+	maxFindingTitleRunes  = 160
+	maxFindingDetailRunes = 1200
 	// Leave room for timestamp/sign, which are added only when sending.
 	maxUnsignedCardBytes = 19 * 1024
 )
@@ -206,12 +209,79 @@ func packCommitGroups(report model.Report, author string, mention model.AuthorMe
 				flush()
 				candidate = appendFinding(nil, commit, finding)
 			}
+			if !fits(candidate) {
+				candidate = []commitFindings{fitSingleFinding(commit, finding, fits)}
+			}
 			current = candidate
 			currentFindings++
 		}
 	}
 	flush()
 	return parts
+}
+
+// fitSingleFinding trims only this card's display copy. The full finding remains
+// in the persisted report, and rebuilding the cards yields the same boundaries.
+func fitSingleFinding(commit commitFindings, finding model.Finding, fits func([]commitFindings) bool) commitFindings {
+	fragment := commitFindings{commit: commit.commit, info: commit.info, findings: []model.Finding{finding}}
+	reduced := finding
+	fitsReduced := func() bool {
+		fragment.findings[0] = reduced
+		return fits([]commitFindings{fragment})
+	}
+	for _, field := range []struct {
+		source string
+		limit  int
+		target *string
+	}{
+		{finding.Detail, maxFindingDetailRunes, &reduced.Detail},
+		{finding.Title, maxFindingTitleRunes, &reduced.Title},
+		{finding.File, maxFindingFileRunes, &reduced.File},
+	} {
+		runes := []rune(field.source)
+		high := min(len(runes), field.limit)
+		*field.target = prefixWithEllipsis(runes, high)
+		if fitsReduced() {
+			return fragment
+		}
+		low, best := 0, -1
+		for low <= high {
+			middle := low + (high-low)/2
+			*field.target = prefixWithEllipsis(runes, middle)
+			if fitsReduced() {
+				best = middle
+				low = middle + 1
+			} else {
+				high = middle - 1
+			}
+		}
+		if best >= 0 {
+			*field.target = prefixWithEllipsis(runes, best)
+			fragment.findings[0] = reduced
+			return fragment
+		}
+		*field.target = ""
+		if fitsReduced() {
+			return fragment
+		}
+	}
+	// The bounded header and commit fields normally make this unreachable. Keep
+	// a compact notice rather than leaving an oversized card in the queue.
+	fragment.info = model.CommitInfo{}
+	fragment.findings[0] = model.Finding{
+		Severity: finding.Severity,
+		Commit:   finding.Commit,
+		Title:    "审查结果过长",
+		Detail:   "完整 finding 已保存在本地 review.json",
+	}
+	return fragment
+}
+
+func prefixWithEllipsis(runes []rune, count int) string {
+	if count >= len(runes) {
+		return string(runes)
+	}
+	return string(runes[:count]) + "…"
 }
 
 func appendFinding(current []commitFindings, commit commitFindings, finding model.Finding) []commitFindings {
@@ -311,15 +381,15 @@ func buildFailureCard(report model.ReviewFailureReport) map[string]any {
 }
 
 func formatFinding(finding model.Finding) string {
-	location := truncate(finding.File, 240)
+	location := truncate(finding.File, maxFindingFileRunes)
 	if finding.Line > 0 {
 		location += fmt.Sprintf(":%d", finding.Line)
 	}
-	content := fmt.Sprintf("**[%s] %s**", strings.ToUpper(finding.Severity), escapeMarkdown(truncate(finding.Title, 160)))
+	content := fmt.Sprintf("**[%s] %s**", strings.ToUpper(finding.Severity), escapeMarkdown(truncate(finding.Title, maxFindingTitleRunes)))
 	if location != "" {
 		content += "\n`" + escapeBackticks(location) + "`"
 	}
-	content += "\n" + escapeMarkdown(truncate(finding.Detail, 1200))
+	content += "\n" + escapeMarkdown(truncate(finding.Detail, maxFindingDetailRunes))
 	return content
 }
 
