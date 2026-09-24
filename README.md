@@ -4,6 +4,8 @@
 
 支持 Linux 和 macOS。Windows 启动时会直接报错。
 
+本仓库所有代码均由AI生成
+
 ## 快速开始
 
 准备好本地 Git 仓库，以及 `pi`、`ohmypi` 或 `crush` 中至少一个 agent 的可执行文件。复制带注释的 [config.example.yaml](config.example.yaml)，修改仓库路径和 agent；不使用飞书时删除示例中的 `feishu` 和 `authors_file` 配置：
