@@ -403,6 +403,109 @@ func TestRunOnceUpdatesStaleWorkspaceWhenStateMatchesRemote(t *testing.T) {
 	}
 }
 
+func TestRunOnceRecoversReviewWorkspaceHistoryAndMissingBranch(t *testing.T) {
+	for _, scenario := range []string{"force_push", "remote_rewind", "local_divergence", "missing_local_branch"} {
+		t.Run(scenario, func(t *testing.T) {
+			dir := t.TempDir()
+			remote := filepath.Join(dir, "remote.git")
+			seed := filepath.Join(dir, "seed")
+			monitored := filepath.Join(dir, "monitored")
+			runGit(t, dir, "init", "--bare", "--initial-branch=main", remote)
+			runGit(t, dir, "init", "--initial-branch=main", seed)
+			commitFile := func(path, content, message string) string {
+				writeFile(t, filepath.Join(path, "message.txt"), content)
+				runGit(t, path, "add", "message.txt")
+				runGit(t, path, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", message)
+				return strings.TrimSpace(runGit(t, path, "rev-parse", "HEAD"))
+			}
+			base := commitFile(seed, "initial\n", "initial")
+			previousHead := commitFile(seed, "original\n", "original")
+			runGit(t, seed, "remote", "add", "origin", remote)
+			runGit(t, seed, "push", "origin", "main")
+			runGit(t, dir, "clone", "--single-branch", "--branch", "main", remote, monitored)
+
+			branch := "main"
+			wantFrom := previousHead
+			var wantHead, wantContent string
+			switch scenario {
+			case "force_push":
+				runGit(t, seed, "switch", "-c", "rewritten", base)
+				wantContent = "rewritten\n"
+				wantHead = commitFile(seed, wantContent, "rewritten history")
+				runGit(t, seed, "push", "--force", "origin", "rewritten:main")
+			case "remote_rewind":
+				wantHead, wantContent = base, "initial\n"
+				runGit(t, seed, "push", "--force", "origin", base+":refs/heads/main")
+			case "local_divergence":
+				commitFile(monitored, "local-only\n", "local history")
+				wantContent = "remote update\n"
+				wantHead = commitFile(seed, wantContent, "remote update")
+				runGit(t, seed, "push", "origin", "main")
+			case "missing_local_branch":
+				branch = "review-new"
+				runGit(t, seed, "switch", "-c", branch)
+				wantFrom = commitFile(seed, "new branch one\n", "new branch one")
+				wantContent = "new branch two\n"
+				wantHead = commitFile(seed, wantContent, "new branch two")
+				runGit(t, seed, "push", "origin", branch)
+			}
+
+			store, err := state.Open(filepath.Join(dir, "state"), "demo")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = store.Close() })
+			if err := store.Put("demo", state.RepositoryState{HeadSHA: previousHead, Branch: "main"}); err != nil {
+				t.Fatal(err)
+			}
+			service := &App{
+				Config: config.Config{
+					PollInterval: config.Duration(time.Minute), Concurrency: 1,
+					Repositories: []config.Repository{{Name: "demo", Path: monitored, Remote: "origin", Branch: branch, Agent: config.Agent{
+						Type: "pi", Command: os.Args[0],
+						Args: []string{"-test.run=TestRunOnceReviewsLatestCommitWithoutBaseline", "--", "{prompt}"},
+						Env:  map[string]string{"GO_WANT_APP_DUMMY": "1", "DUMMY_VERDICT": "approve"}, Timeout: config.Duration(10 * time.Second),
+					}}},
+				},
+				State: store, Reviewer: review.Reviewer{RunsDir: filepath.Join(dir, "runs")}, Notifier: &recordingNotifier{},
+			}
+			for poll := 0; poll < 2; poll++ {
+				if err := service.RunOnce(context.Background()); err != nil {
+					t.Fatalf("poll %d: %v", poll, err)
+				}
+			}
+			current, _ := store.Get("demo")
+			localHead := strings.TrimSpace(runGit(t, monitored, "rev-parse", "HEAD"))
+			localBranch := strings.TrimSpace(runGit(t, monitored, "branch", "--show-current"))
+			if current.HeadSHA != wantHead || localHead != wantHead || current.Branch != branch || localBranch != branch || current.ReviewFailure != nil {
+				t.Fatalf("state = %#v, local HEAD = %s, branch = %s; want %s/%s", current, localHead, localBranch, branch, wantHead)
+			}
+			if content, err := os.ReadFile(filepath.Join(monitored, "message.txt")); err != nil || string(content) != wantContent {
+				t.Fatalf("workspace content = %q, want %q, error = %v", content, wantContent, err)
+			}
+			requests, err := filepath.Glob(filepath.Join(dir, "runs", "*", "request.json"))
+			if err != nil || len(requests) != 1 {
+				t.Fatalf("recovery should converge after one review, requests = %v, error = %v", requests, err)
+			}
+			data, err := os.ReadFile(requests[0])
+			if err != nil {
+				t.Fatal(err)
+			}
+			var request struct {
+				FromSHA     string `json:"from_sha"`
+				ObservedSHA string `json:"observed_sha"`
+				LatestOnly  bool   `json:"latest_only"`
+			}
+			if err := json.Unmarshal(data, &request); err != nil {
+				t.Fatal(err)
+			}
+			if request.FromSHA != wantFrom || request.ObservedSHA != wantHead || request.LatestOnly != (scenario == "missing_local_branch") {
+				t.Fatalf("review range = %#v, want from %s to %s", request, wantFrom, wantHead)
+			}
+		})
+	}
+}
+
 type failOnceNotifier struct {
 	calls             int
 	failureCalls      int
@@ -814,11 +917,26 @@ func appDummyAgent() {
 			}
 		}
 	}
-	if err := exec.Command("git", "switch", os.Getenv("CANCANNEED_BRANCH")).Run(); err != nil {
-		os.Exit(26)
+	remote := os.Getenv("CANCANNEED_REMOTE")
+	branch := os.Getenv("CANCANNEED_BRANCH")
+	remoteRef := "refs/remotes/" + remote + "/" + branch
+	fetchBranch := func() error {
+		return exec.Command("git", "fetch", "--no-tags", "--", remote, "+refs/heads/"+branch+":"+remoteRef).Run()
 	}
-	if err := exec.Command("git", "pull", "--ff-only", "--no-tags", "--", os.Getenv("CANCANNEED_REMOTE"), os.Getenv("CANCANNEED_BRANCH")).Run(); err != nil {
+	if err := exec.Command("git", "switch", branch).Run(); err != nil {
+		if err := fetchBranch(); err != nil {
+			os.Exit(20)
+		}
+		if err := exec.Command("git", "switch", "-c", branch, remoteRef).Run(); err != nil {
+			os.Exit(26)
+		}
+	}
+	_ = exec.Command("git", "pull", "--ff-only", "--no-tags", "--", remote, branch).Run()
+	if err := fetchBranch(); err != nil {
 		os.Exit(20)
+	}
+	if err := exec.Command("git", "reset", "--hard", remoteRef).Run(); err != nil {
+		os.Exit(27)
 	}
 	if ready := os.Getenv("DUMMY_READY_FILE"); ready != "" {
 		if err := os.WriteFile(ready, []byte("ready"), 0o600); err != nil {

@@ -265,7 +265,7 @@ fi
 
 func buildPrompt(request Request, submitPath string) string {
 	introduction := fmt.Sprintf(
-		"上一次已经审查的提交是 %s。远端：%q；监控分支：%q。请审查该记录 SHA 到 pull 后本地 HEAD 之间的所有新增 commit。",
+		"上一次已经审查的提交是 %s。远端：%q；监控分支：%q。请审查该记录 SHA 到更新后本地 HEAD 之间的所有新增 commit。",
 		request.FromSHA, request.Repository.Remote, request.Branch,
 	)
 	coverage := "必须逐个检查范围内的所有新增 commit，不要只看最新几个，也不要只看改动最大的 commit。除下面明确允许跳过的 commit 外，一个都不要遗漏。"
@@ -297,9 +297,9 @@ func buildPrompt(request Request, submitPath string) string {
 4. 如果范围内所有 commit 都可以跳过，调用一次 %s skip --reason "<全部跳过的原因>" 并正常退出。
 
 执行规则：
-1. 在原仓库切换到监控分支，执行 git pull --ff-only -- "$CANCANNEED_REMOTE" "$CANCANNEED_BRANCH" 更新工作区，然后读取 review.md 并开始审查。
-2. 以 pull 后的本地 HEAD 为审查终点，结束时保持该 HEAD；cancanneed 会记录它作为下次审查起点。不要编辑代码、创建提交、推送或运行测试。
-3. 如果切换分支或 pull 失败，调用 %s fetch-failed --reason "<简洁的 Git 错误>"，看到“提交成功”后停止审查并退出。
+1. 在原仓库切换到监控分支，执行 git pull --ff-only -- "$CANCANNEED_REMOTE" "$CANCANNEED_BRANCH" 更新工作区。本地分支不存在则先拉取并创建；历史分叉或远端回退时，允许将这个专用 review 副本的本地分支和工作区强制同步到远端最新提交。确认本地 HEAD 与拉取到的远端目标提交一致后，再读取 review.md 并开始审查。
+2. 以更新后的本地 HEAD 为审查终点，结束时保持该 HEAD；cancanneed 会记录它作为下次审查起点。不要编辑代码、创建提交、推送或运行测试。
+3. 如果远端无法访问或上述同步最终失败，调用 %s fetch-failed --reason "<简洁的 Git 错误>"，看到“提交成功”后停止审查并退出；不能使用拉取失败前的旧版本继续审查。
 4. 每发现一个符合上述上报标准的问题，调用一次下面的工具；多个问题可以并发提交：
    %s finding --author "<git show -s --format=%%an 得到的提交作者名称>" --commit "<完整提交 SHA>" --file "<仓库相对文件路径>" --line <新文件中的行号> --severity "<critical|high|medium>" --title "<问题标题>" --detail "<问题原因和修复建议>"
 5. 每次调用提交工具后阅读它的反馈：只有看到“提交成功”才表示结果已记录，不要重复提交；看到“提交失败”时按具体原因修正参数或完整 commit SHA 后重新调用。

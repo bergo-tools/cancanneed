@@ -38,16 +38,26 @@ func run() error {
 
 	remote := envOr("CANCANNEED_REMOTE", "origin")
 	branch := envOr("CANCANNEED_BRANCH", "main")
-	if err := runGit("fetch", "--no-tags", "--", remote, branch); err != nil {
-		return fmt.Errorf("fetch remote: %w", err)
+	remoteRef := "refs/remotes/" + remote + "/" + branch
+	fetchBranch := func() error {
+		return runGit("fetch", "--no-tags", "--", remote, "+refs/heads/"+branch+":"+remoteRef)
 	}
 	if err := runGit("switch", branch); err != nil {
-		if err := runGit("switch", "-c", branch, "FETCH_HEAD"); err != nil {
+		if err := fetchBranch(); err != nil {
+			return fmt.Errorf("fetch review branch: %w", err)
+		}
+		if err := runGit("switch", "-c", branch, remoteRef); err != nil {
 			return fmt.Errorf("switch review branch: %w", err)
 		}
 	}
-	if err := runGit("pull", "--ff-only", "--no-tags", "--", remote, branch); err != nil {
-		return fmt.Errorf("update review workspace: %w", err)
+	// Pull can fail on diverged history or succeed without applying a rewind.
+	// A fresh explicit fetch must succeed before mirroring this review copy.
+	_ = runGit("pull", "--ff-only", "--no-tags", "--", remote, branch)
+	if err := fetchBranch(); err != nil {
+		return fmt.Errorf("fetch review branch: %w", err)
+	}
+	if err := runGit("reset", "--hard", remoteRef); err != nil {
+		return fmt.Errorf("synchronize review workspace: %w", err)
 	}
 	if envOr("DUMMY_VERDICT", "approve") == "skip" {
 		submit := os.Getenv("CANCANNEED_SUBMIT_SCRIPT")

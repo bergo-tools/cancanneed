@@ -34,7 +34,11 @@ func TestBuildPromptUsesChineseInstructions(t *testing.T) {
 		"等待所有 finding 命令成功执行完成后直接正常退出",
 		"在原仓库切换到监控分支",
 		"git pull --ff-only -- \"$CANCANNEED_REMOTE\" \"$CANCANNEED_BRANCH\"",
-		"该记录 SHA 到 pull 后本地 HEAD 之间的所有新增 commit",
+		"该记录 SHA 到更新后本地 HEAD 之间的所有新增 commit",
+		"本地分支不存在则先拉取并创建",
+		"历史分叉或远端回退时",
+		"确认本地 HEAD 与拉取到的远端目标提交一致",
+		"如果远端无法访问或上述同步最终失败",
 		"结束时保持该 HEAD",
 	} {
 		if !strings.Contains(prompt, required) {
