@@ -32,6 +32,10 @@ func TestBuildPromptUsesChineseInstructions(t *testing.T) {
 		"只有看到“提交成功”才表示结果已记录",
 		"看到“提交失败”时按具体原因修正",
 		"等待所有 finding 命令成功执行完成后直接正常退出",
+		"在原仓库切换到监控分支",
+		"git pull --ff-only -- \"$CANCANNEED_REMOTE\" \"$CANCANNEED_BRANCH\"",
+		"该记录 SHA 到 pull 后本地 HEAD 之间的所有新增 commit",
+		"结束时保持该 HEAD",
 	} {
 		if !strings.Contains(prompt, required) {
 			t.Fatalf("prompt does not contain %q:\n%s", required, prompt)
@@ -45,6 +49,9 @@ func TestBuildPromptUsesChineseInstructions(t *testing.T) {
 	}
 	if strings.Contains(prompt, "检查退出码") {
 		t.Fatalf("prompt should rely on explicit submission feedback:\n%s", prompt)
+	}
+	if strings.Contains(prompt, "FETCH_HEAD") {
+		t.Fatalf("prompt should use the local HEAD after pull:\n%s", prompt)
 	}
 }
 
@@ -140,7 +147,7 @@ func TestBuildPromptReviewsOnlyLatestCommitWithoutHistory(t *testing.T) {
 	}, "/tmp/submit-review.sh")
 	for _, required := range []string{
 		"当前没有这个分支的历史审查 HEAD",
-		"只审查 FETCH_HEAD 对应的一个 commit",
+		"只审查更新后本地 HEAD 对应的一个 commit",
 		"根提交以空树为起点",
 		"不要回溯审查更早的 commit",
 	} {
@@ -150,5 +157,8 @@ func TestBuildPromptReviewsOnlyLatestCommitWithoutHistory(t *testing.T) {
 	}
 	if strings.Contains(prompt, "上一次已经审查的提交") {
 		t.Fatalf("latest-only prompt claims a historical review exists:\n%s", prompt)
+	}
+	if strings.Contains(prompt, "FETCH_HEAD") {
+		t.Fatalf("latest-only prompt should use the local HEAD after pull:\n%s", prompt)
 	}
 }

@@ -68,16 +68,16 @@ func (r Repository) RemoteHead(ctx context.Context, branch string) (string, erro
 	return fields[0], nil
 }
 
-// ReviewHead returns the commit left in FETCH_HEAD by the agent's final fetch.
-// It deliberately does not contact the remote: this is the exact local snapshot
-// the completed review was based on, even if the remote moves immediately after.
+// ReviewHead returns the local commit checked out by the agent for review.
+// It deliberately does not contact the remote: this is the exact working-tree
+// snapshot the completed review was based on, even if the remote moves later.
 func (r Repository) ReviewHead(ctx context.Context) (string, error) {
-	head, err := r.run(ctx, "rev-parse", "FETCH_HEAD^{commit}")
+	head, err := r.run(ctx, "rev-parse", "HEAD^{commit}")
 	if err != nil {
-		return "", fmt.Errorf("resolve reviewed FETCH_HEAD: %w", err)
+		return "", fmt.Errorf("resolve reviewed local HEAD: %w", err)
 	}
 	if !validObjectID(head) {
-		return "", fmt.Errorf("unexpected reviewed FETCH_HEAD: %q", head)
+		return "", fmt.Errorf("unexpected reviewed local HEAD: %q", head)
 	}
 	return head, nil
 }

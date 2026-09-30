@@ -193,6 +193,12 @@ func TestRunOnceReviewsLatestCommitWithoutBaseline(t *testing.T) {
 	if updated.HeadSHA != newHead {
 		t.Fatalf("head = %s, want %s", updated.HeadSHA, newHead)
 	}
+	if localHead := strings.TrimSpace(runGit(t, monitored, "rev-parse", "HEAD")); localHead != updated.HeadSHA {
+		t.Fatalf("local HEAD = %s, want reviewed HEAD %s", localHead, updated.HeadSHA)
+	}
+	if content, err := os.ReadFile(filepath.Join(monitored, "message.txt")); err != nil || string(content) != "advanced while agent started\n" {
+		t.Fatalf("review workspace content = %q, error = %v", content, err)
+	}
 	if len(updated.PendingNotifications) != 0 {
 		t.Fatalf("notification should be delivered: %#v", updated.PendingNotifications)
 	}
@@ -334,6 +340,66 @@ func TestRunOnceReviewsLatestCommitWithoutBaseline(t *testing.T) {
 	updated, _ = store.Get("demo")
 	if updated.HeadSHA != skippedHead || updated.ReviewFailure == nil || updated.ReviewFailure.Count != 1 || notifier.failureCalls != 1 {
 		t.Fatalf("fetch failure state = %#v, failure notifications = %d", updated, notifier.failureCalls)
+	}
+}
+
+func TestRunOnceUpdatesStaleWorkspaceWhenStateMatchesRemote(t *testing.T) {
+	dir := t.TempDir()
+	remote := filepath.Join(dir, "remote.git")
+	seed := filepath.Join(dir, "seed")
+	monitored := filepath.Join(dir, "monitored")
+	runGit(t, dir, "init", "--bare", "--initial-branch=main", remote)
+	runGit(t, dir, "init", "--initial-branch=main", seed)
+	writeFile(t, filepath.Join(seed, "message.txt"), "initial\n")
+	runGit(t, seed, "add", "message.txt")
+	runGit(t, seed, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "initial")
+	runGit(t, seed, "remote", "add", "origin", remote)
+	runGit(t, seed, "push", "origin", "main")
+	runGit(t, dir, "clone", remote, monitored)
+	writeFile(t, filepath.Join(seed, "message.txt"), "updated\n")
+	runGit(t, seed, "add", "message.txt")
+	runGit(t, seed, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "update")
+	runGit(t, seed, "push", "origin", "main")
+	head := strings.TrimSpace(runGit(t, seed, "rev-parse", "HEAD"))
+	if localHead := strings.TrimSpace(runGit(t, monitored, "rev-parse", "HEAD")); localHead == head {
+		t.Fatal("test setup did not leave the local workspace behind the remote")
+	}
+	store, err := state.Open(filepath.Join(dir, "state"), "demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.Put("demo", state.RepositoryState{HeadSHA: head, Branch: "main"}); err != nil {
+		t.Fatal(err)
+	}
+	notifier := &recordingNotifier{}
+	service := &App{
+		Config: config.Config{
+			PollInterval: config.Duration(time.Minute), Concurrency: 1,
+			Repositories: []config.Repository{{Name: "demo", Path: monitored, Remote: "origin", Branch: "main", Agent: config.Agent{
+				Type: "pi", Command: os.Args[0],
+				Args: []string{"-test.run=TestRunOnceReviewsLatestCommitWithoutBaseline", "--", "{prompt}"},
+				Env:  map[string]string{"GO_WANT_APP_DUMMY": "1", "DUMMY_VERDICT": "approve"}, Timeout: config.Duration(10 * time.Second),
+			}}},
+		},
+		State: store, Reviewer: review.Reviewer{RunsDir: filepath.Join(dir, "runs")}, Notifier: notifier,
+	}
+	for poll := 0; poll < 2; poll++ {
+		if err := service.RunOnce(context.Background()); err != nil {
+			t.Fatalf("poll %d: %v", poll, err)
+		}
+	}
+	current, _ := store.Get("demo")
+	localHead := strings.TrimSpace(runGit(t, monitored, "rev-parse", "HEAD"))
+	if current.HeadSHA != head || localHead != head {
+		t.Fatalf("reviewed HEAD = %s, local HEAD = %s, want %s", current.HeadSHA, localHead, head)
+	}
+	if content, err := os.ReadFile(filepath.Join(monitored, "message.txt")); err != nil || string(content) != "updated\n" {
+		t.Fatalf("review workspace content = %q, error = %v", content, err)
+	}
+	runs, err := filepath.Glob(filepath.Join(dir, "runs", "*"))
+	if err != nil || len(runs) != 1 {
+		t.Fatalf("workspace update should run once, runs = %v, error = %v", runs, err)
 	}
 }
 
@@ -748,7 +814,10 @@ func appDummyAgent() {
 			}
 		}
 	}
-	if err := exec.Command("git", "fetch", "--no-tags", "origin", "main").Run(); err != nil {
+	if err := exec.Command("git", "switch", os.Getenv("CANCANNEED_BRANCH")).Run(); err != nil {
+		os.Exit(26)
+	}
+	if err := exec.Command("git", "pull", "--ff-only", "--no-tags", "--", os.Getenv("CANCANNEED_REMOTE"), os.Getenv("CANCANNEED_BRANCH")).Run(); err != nil {
 		os.Exit(20)
 	}
 	if ready := os.Getenv("DUMMY_READY_FILE"); ready != "" {
@@ -759,7 +828,7 @@ func appDummyAgent() {
 	}
 	verdict := os.Getenv("DUMMY_VERDICT")
 	if verdict == "finding" {
-		commit, err := exec.Command("git", "rev-parse", "FETCH_HEAD^{commit}").Output()
+		commit, err := exec.Command("git", "rev-parse", "HEAD^{commit}").Output()
 		if err != nil {
 			os.Exit(23)
 		}

@@ -36,8 +36,18 @@ func run() error {
 		}
 	}
 
-	if err := runGit("fetch", "--no-tags", envOr("CANCANNEED_REMOTE", "origin"), envOr("CANCANNEED_BRANCH", "main")); err != nil {
+	remote := envOr("CANCANNEED_REMOTE", "origin")
+	branch := envOr("CANCANNEED_BRANCH", "main")
+	if err := runGit("fetch", "--no-tags", "--", remote, branch); err != nil {
 		return fmt.Errorf("fetch remote: %w", err)
+	}
+	if err := runGit("switch", branch); err != nil {
+		if err := runGit("switch", "-c", branch, "FETCH_HEAD"); err != nil {
+			return fmt.Errorf("switch review branch: %w", err)
+		}
+	}
+	if err := runGit("pull", "--ff-only", "--no-tags", "--", remote, branch); err != nil {
+		return fmt.Errorf("update review workspace: %w", err)
 	}
 	if envOr("DUMMY_VERDICT", "approve") == "skip" {
 		submit := os.Getenv("CANCANNEED_SUBMIT_SCRIPT")

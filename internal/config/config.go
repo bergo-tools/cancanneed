@@ -421,8 +421,8 @@ func identifyWorkspace(path string) workspaceIdentity {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	// FETCH_HEAD is stored in this per-worktree Git directory. Linked
-	// worktrees have different directories and can therefore run in parallel.
+	// HEAD and the index are stored in this per-worktree Git directory.
+	// Linked worktrees have separate review workspaces and can run in parallel.
 	output, err := exec.CommandContext(ctx, "git", "-C", path, "rev-parse", "--absolute-git-dir").Output()
 	if err != nil {
 		return identity

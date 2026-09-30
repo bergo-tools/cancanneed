@@ -77,13 +77,13 @@ Agent 子进程继承 cancanneed 的环境变量，还可通过 `agent.env` 覆�
 
 ## 审查如何进行
 
-检测到新 HEAD 后，cancanneed 把上次审查的 SHA、远端和分支传给 agent。agent 自己 `git fetch`，逐个审查范围内的提交，并先读取仓库根目录下的 `review.md`（文件名忽略大小写）。首次运行、状态缺少 HEAD 或切换监控分支时，只审查当时最新的一个 commit：普通提交以第一父提交为对比起点，根提交以空树为起点。之后从已记录的 HEAD 增量审查。
+检测到新 HEAD 后，cancanneed 把上次审查的 SHA、远端和分支传给 agent。agent 在原仓库切换到监控分支并执行 `git pull --ff-only`，然后读取 `review.md`（文件名忽略大小写），逐个审查已记录 SHA 到更新后本地 HEAD 之间的新增 commit。首次运行、状态缺少 HEAD 或切换监控分支时，只审查更新后的最新一个 commit：普通提交对比第一父提交，根提交对比空树。
 
 审查只上报有明确证据且真正重要的问题，例如逻辑错误、崩溃、数据损坏、并发竞态、安全问题、资源泄漏和明显的接口误用。finding 的标题应直指问题，详情简洁说明触发条件、实际后果和修复方向。代码风格和纯重构偏好不在上报范围内。
 
 提交标题或正文包含 `noreview`，或者整个提交都是第三方依赖同步、明显的自动化批量修改时，可以跳过该提交。混合提交仍需审查其中的人工修改。全部提交都可跳过时，agent 通过提交工具记录 `skip`，程序推进 HEAD，但不发送结果通知。
 
-Agent 成功完成审查后，cancanneed 读取它审查现场的本地 `FETCH_HEAD` 作为新进度；不会在审查结束后重新读取远端。审查失败时保留原 HEAD，下次轮询继续处理。
+Agent 正常完成后，cancanneed 将现场的本地 `HEAD` 记录为新的审查进度。即使 state 已等于远端 HEAD，只要本地 HEAD 不一致，也会启动 agent 同步工作区。拉取或审查失败时保留原进度，按轮询间隔重试。
 
 ### 提交 finding
 
@@ -108,10 +108,10 @@ Agent 成功完成审查后，cancanneed 读取它审查现场的本地 `FETCH_H
 "$CANCANNEED_SUBMIT_SCRIPT" skip --reason "范围内所有 commit 均包含 noreview"
 ```
 
-如果 agent 无法 `git fetch`（例如网络或远端权限错误），应立即报告并结束本轮审查：
+如果 agent 无法拉取或更新工作区（例如网络、远端权限或快进更新失败），应立即报告并结束本轮审查：
 
 ```bash
-"$CANCANNEED_SUBMIT_SCRIPT" fetch-failed --reason "git fetch origin main: permission denied"
+"$CANCANNEED_SUBMIT_SCRIPT" fetch-failed --reason "git pull --ff-only origin main: permission denied"
 ```
 
 该指令会废弃本轮已提交的部分 finding；cancanneed 将本轮视为失败，保留原 HEAD，并在下次轮询重试。提交工具成功写入失败标记后，agent 直接退出即可。检测远端更新时遇到 Git 错误也会按审查失败记录。

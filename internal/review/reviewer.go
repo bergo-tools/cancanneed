@@ -265,13 +265,13 @@ fi
 
 func buildPrompt(request Request, submitPath string) string {
 	introduction := fmt.Sprintf(
-		"上一次已经审查的提交是 %s。请在当前仓库中自行拉取远端 %q 的 %q 分支，确定该分支最新的 HEAD，并审查从上次已审查提交到最新 HEAD 之间的全部变更。",
+		"上一次已经审查的提交是 %s。远端：%q；监控分支：%q。请审查该记录 SHA 到 pull 后本地 HEAD 之间的所有新增 commit。",
 		request.FromSHA, request.Repository.Remote, request.Branch,
 	)
 	coverage := "必须逐个检查范围内的所有新增 commit，不要只看最新几个，也不要只看改动最大的 commit。除下面明确允许跳过的 commit 外，一个都不要遗漏。"
 	if request.LatestOnly {
 		introduction = fmt.Sprintf(
-			"当前没有这个分支的历史审查 HEAD。请在当前仓库中自行 fetch 远端 %q 的 %q 分支，只审查 FETCH_HEAD 对应的一个 commit。普通提交以 FETCH_HEAD 的第一父提交为对比起点，根提交以空树为起点；不要使用更早的历史审查起点，也不代表更早的提交已经审查过。",
+			"当前没有这个分支的历史审查 HEAD。远端：%q；监控分支：%q。只审查更新后本地 HEAD 对应的一个 commit：普通提交对比第一父提交，根提交以空树为起点。",
 			request.Repository.Remote, request.Branch,
 		)
 		coverage = "只检查最新 HEAD 对应的这个 commit，不要回溯审查更早的 commit。仍需完整检查该 commit 的所有人工改动，除下面明确允许跳过的情况外不要遗漏。"
@@ -297,9 +297,9 @@ func buildPrompt(request Request, submitPath string) string {
 4. 如果范围内所有 commit 都可以跳过，调用一次 %s skip --reason "<全部跳过的原因>" 并正常退出。
 
 执行规则：
-1. 不要编辑仓库文件、创建提交、切换分支或推送任何内容。
-2. 自行使用 git fetch 拉取并检查变更，以 FETCH_HEAD 作为本次审查的最新终点。按需阅读相关上下文代码，不要运行测试，也不要写入，只进行review。
-3. 如果 git fetch 因网络、认证、权限等原因失败，立即调用 %s fetch-failed --reason "<简洁的 Git 错误>"；确认命令成功后停止审查并正常退出。不要沿用旧的 FETCH_HEAD，也不要继续提交 finding。cancanneed 会把本轮记为审查失败。
+1. 在原仓库切换到监控分支，执行 git pull --ff-only -- "$CANCANNEED_REMOTE" "$CANCANNEED_BRANCH" 更新工作区，然后读取 review.md 并开始审查。
+2. 以 pull 后的本地 HEAD 为审查终点，结束时保持该 HEAD；cancanneed 会记录它作为下次审查起点。不要编辑代码、创建提交、推送或运行测试。
+3. 如果切换分支或 pull 失败，调用 %s fetch-failed --reason "<简洁的 Git 错误>"，看到“提交成功”后停止审查并退出。
 4. 每发现一个符合上述上报标准的问题，调用一次下面的工具；多个问题可以并发提交：
    %s finding --author "<git show -s --format=%%an 得到的提交作者名称>" --commit "<完整提交 SHA>" --file "<仓库相对文件路径>" --line <新文件中的行号> --severity "<critical|high|medium>" --title "<问题标题>" --detail "<问题原因和修复建议>"
 5. 每次调用提交工具后阅读它的反馈：只有看到“提交成功”才表示结果已记录，不要重复提交；看到“提交失败”时按具体原因修正参数或完整 commit SHA 后重新调用。

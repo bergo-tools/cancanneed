@@ -48,7 +48,7 @@ func TestReviewBaseUsesFirstParentOrEmptyTree(t *testing.T) {
 		t.Fatal(err)
 	}
 	if reviewed != head {
-		t.Fatalf("review head = %s, want fetched head %s", reviewed, head)
+		t.Fatalf("review head = %s, want local head %s", reviewed, head)
 	}
 	info, err := repository.CommitInfo(context.Background(), head)
 	if err != nil {
@@ -56,6 +56,28 @@ func TestReviewBaseUsesFirstParentOrEmptyTree(t *testing.T) {
 	}
 	if info.Commit != head || info.Author != "Test" || info.AuthorEmail != "test@example.com" || info.Subject != "update" || info.CommittedAt.IsZero() {
 		t.Fatalf("commit info = %#v", info)
+	}
+}
+
+func TestReviewHeadUsesLocalCheckoutInsteadOfFetchHead(t *testing.T) {
+	dir := t.TempDir()
+	runTestGit(t, dir, "init", "--initial-branch=main")
+	runTestGit(t, dir, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "--allow-empty", "-m", "initial")
+	localHead := strings.TrimSpace(runTestGit(t, dir, "rev-parse", "HEAD"))
+	runTestGit(t, dir, "switch", "-c", "other")
+	runTestGit(t, dir, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "--allow-empty", "-m", "other branch")
+	fetchedHead := strings.TrimSpace(runTestGit(t, dir, "rev-parse", "HEAD"))
+	runTestGit(t, dir, "switch", "main")
+	runTestGit(t, dir, "fetch", ".", "other")
+	if got := strings.TrimSpace(runTestGit(t, dir, "rev-parse", "FETCH_HEAD")); got != fetchedHead || got == localHead {
+		t.Fatalf("test setup FETCH_HEAD = %s, local HEAD = %s", got, localHead)
+	}
+	reviewed, err := (Repository{Path: dir}).ReviewHead(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reviewed != localHead {
+		t.Fatalf("review head = %s, want checked-out commit %s", reviewed, localHead)
 	}
 }
 

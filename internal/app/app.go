@@ -185,6 +185,17 @@ func (a *App) processRepositoryWithCheckTimeout(ctx context.Context, repository 
 			current.Branch = branch
 		}
 	}
+	workspaceOutdated := false
+	if !latestOnly && current.HeadSHA == head {
+		localHead, err := git.ReviewHead(checkCtx)
+		if err != nil {
+			return checkFailure(branch, head, err)
+		}
+		workspaceOutdated = localHead != head
+		if workspaceOutdated {
+			a.logger().Info("repository workspace needs update", "repository", repository.Name, "branch", branch, "local_head", localHead, "reviewed_head", current.HeadSHA, "remote_head", head)
+		}
+	}
 	if err := checkCtx.Err(); err != nil {
 		return checkFailure(branch, head, err)
 	}
@@ -195,7 +206,7 @@ func (a *App) processRepositoryWithCheckTimeout(ctx context.Context, repository 
 			return errors.Join(pendingDeliveryErr, fmt.Errorf("clear recovered repository check failure: %w", err))
 		}
 	}
-	if !latestOnly && current.HeadSHA == head {
+	if !latestOnly && current.HeadSHA == head && !workspaceOutdated {
 		if current.ReviewFailure != nil {
 			current.ReviewFailure = nil
 			if err := a.State.Put(repository.Name, current); err != nil {
